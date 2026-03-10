@@ -16,22 +16,24 @@ if not os.path.exists(SCREENSHOT_DIR):
     os.makedirs(SCREENSHOT_DIR)
 
 def capture_screen():
-    """Captures the current screen and saves it as a temporary file."""
+    """Captures and optimizes screenshot for faster backend processing."""
     timestamp = int(time.time())
-    file_path = os.path.join(SCREENSHOT_DIR, f"screen_{timestamp}.png")
+    file_path = os.path.join(SCREENSHOT_DIR, f"screen_{timestamp}.jpg")
     
-    # Take screenshot using pyautogui
+    # 1. Capture screen
     screenshot = pyautogui.screenshot()
     
-    # Optimization: Reduce image size for faster API processing
-    screenshot.thumbnail((1280, 720)) # Resize to 720p to save bandwidth/latency
-    screenshot.save(file_path, "PNG")
+    # 2. Optimization: Resize to 720p (Good balance of detail/speed)
+    screenshot.thumbnail((1280, 720)) 
     
-    print(f"Captured screenshot: {file_path}")
+    # 3. Compression: Save as JPG with quality optimization (saves bandwidth)
+    screenshot.save(file_path, "JPEG", quality=75, optimize=True)
+    
+    print(f"Captured/Optimized: {file_path}")
     return file_path
 
 def process_screen_pipeline(file_path):
-    """Pipeline: Sends screenshot to backend and returns the text guidance."""
+    """Sends screenshot to backend and processes the structured JSON response."""
     url = f"{BACKEND_URL}/process-screen"
     
     try:
@@ -42,11 +44,20 @@ def process_screen_pipeline(file_path):
         if response.status_code == 200:
             result = response.json()
             if result["status"] == "success":
-                guidance = result.get("guidance", "Aria is here.")
-                print(f"--- ARIA'S GUIDANCE: {guidance} ---")
-                return guidance
+                data = result["data"]
+                guidance = data.get("guidance", "Aria is here.")
+                urgency = data.get("urgency", "low")
+                hint = data.get("action_hint", "Waiting for screen...")
+                
+                # Output formatted for CLI/Console (Later for Dev 2 to hook UI)
+                print(f"\n--- ARIA'S GUIDANCE (Urgency: {urgency}) ---")
+                print(f"Message: {guidance}")
+                print(f"Action:  {hint}")
+                print("-" * 40)
+                
+                return data
         else:
-            print(f"Backend error: {response.status_code} - {response.text}")
+            print(f"Backend error: {response.status_code}")
             
     except Exception as e:
         print(f"Connection error: {e}")
@@ -54,21 +65,14 @@ def process_screen_pipeline(file_path):
     return None
 
 def run_loop():
-    """Main loop for periodic screen capture and processing."""
-    print(f"Starting LegacyBridge Pipeline (Interval: {INTERVAL}s)...")
+    """Main loop for periodic screen capture and structured processing."""
+    print(f"Starting LegacyBridge Optimized Pipeline (Interval: {INTERVAL}s)...")
     try:
         while True:
-            # Step 1: Capture
             file_path = capture_screen()
+            process_screen_pipeline(file_path)
             
-            # Step 2 & 3: API call & Text Output
-            guidance = process_screen_pipeline(file_path)
-            
-            # Step 4: UI integration (future step for Dev 2)
-            # if guidance:
-            #     update_overlay(guidance)
-            
-            # Clean up old screenshots to save space
+            # Clean up old screenshots immediately
             if os.path.exists(file_path):
                 os.remove(file_path)
                 
