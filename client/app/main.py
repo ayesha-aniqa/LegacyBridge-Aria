@@ -2,6 +2,8 @@ import time
 import os
 import requests
 import pyautogui
+import threading
+import tkinter as tk
 from PIL import Image
 from dotenv import load_dotenv
 
@@ -15,70 +17,99 @@ SCREENSHOT_DIR = "screenshots"
 if not os.path.exists(SCREENSHOT_DIR):
     os.makedirs(SCREENSHOT_DIR)
 
-def capture_screen():
-    """Captures and optimizes screenshot for faster backend processing."""
-    timestamp = int(time.time())
-    file_path = os.path.join(SCREENSHOT_DIR, f"screen_{timestamp}.jpg")
-    
-    # 1. Capture screen
-    screenshot = pyautogui.screenshot()
-    
-    # 2. Optimization: Resize to 720p (Good balance of detail/speed)
-    screenshot.thumbnail((1280, 720)) 
-    
-    # 3. Compression: Save as JPG with quality optimization (saves bandwidth)
-    screenshot.save(file_path, "JPEG", quality=75, optimize=True)
-    
-    print(f"Captured/Optimized: {file_path}")
-    return file_path
+class LegacyBridgeApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("LegacyBridge - Aria")
+        self.root.geometry("450x350+100+100") # Positioned top-left
+        self.root.attributes("-topmost", True)
+        self.root.overrideredirect(False) # Keep window decorations for now
+        
+        # UI Elements
+        self.title_label = tk.Label(root, text="Aria is Watching 👵🤝🤖", font=("Arial", 16, "bold"), fg="#2c3e50")
+        self.title_label.pack(pady=10)
+        
+        self.status_label = tk.Label(root, text="Status: Ready", font=("Arial", 10), fg="green")
+        self.status_label.pack()
+        
+        self.guidance_box = tk.Text(root, height=5, width=40, font=("Arial", 14), wrap=tk.WORD, bg="#f9f9f9", padx=10, pady=10)
+        self.guidance_box.pack(pady=15)
+        self.guidance_box.insert(tk.END, "I'm here to help. Just use your computer normally.")
+        
+        self.action_label = tk.Label(root, text="", font=("Arial", 12, "italic"), fg="#e67e22")
+        self.action_label.pack()
 
-def process_screen_pipeline(file_path):
-    """Sends screenshot to backend and processes the structured JSON response."""
-    url = f"{BACKEND_URL}/process-screen"
-    
-    try:
-        with open(file_path, "rb") as f:
-            files = {"file": f}
-            response = requests.post(url, files=files)
-            
-        if response.status_code == 200:
-            result = response.json()
-            if result["status"] == "success":
-                data = result["data"]
-                guidance = data.get("guidance", "Aria is here.")
-                urgency = data.get("urgency", "low")
-                hint = data.get("action_hint", "Waiting for screen...")
-                
-                # Output formatted for CLI/Console (Later for Dev 2 to hook UI)
-                print(f"\n--- ARIA'S GUIDANCE (Urgency: {urgency}) ---")
-                print(f"Message: {guidance}")
-                print(f"Action:  {hint}")
-                print("-" * 40)
-                
-                return data
+        # Start the processing thread
+        self.running = True
+        self.thread = threading.Thread(target=self.run_logic_loop, daemon=True)
+        self.thread.start()
+
+    def update_ui(self, guidance, urgency, hint):
+        """Updates the UI elements with data from the backend."""
+        self.guidance_box.delete(1.0, tk.END)
+        self.guidance_box.insert(tk.END, guidance)
+        
+        self.action_label.config(text=f"Hint: {hint}" if hint else "")
+        
+        # Change UI color based on urgency
+        if urgency == "high":
+            self.guidance_box.config(bg="#fff2f2") # Light red
+            self.status_label.config(text="Status: Active Help", fg="red")
+        elif urgency == "medium":
+            self.guidance_box.config(bg="#fffdf2") # Light yellow
+            self.status_label.config(text="Status: Suggesting", fg="orange")
         else:
-            print(f"Backend error: {response.status_code}")
-            
-    except Exception as e:
-        print(f"Connection error: {e}")
-    
-    return None
+            self.guidance_box.config(bg="#f2fff2") # Light green
+            self.status_label.config(text="Status: Monitoring", fg="green")
 
-def run_loop():
-    """Main loop for periodic screen capture and structured processing."""
-    print(f"Starting LegacyBridge Optimized Pipeline (Interval: {INTERVAL}s)...")
-    try:
-        while True:
-            file_path = capture_screen()
-            process_screen_pipeline(file_path)
+    def capture_and_process(self):
+        """Single step: Capture -> Send -> Get Response."""
+        timestamp = int(time.time())
+        file_path = os.path.join(SCREENSHOT_DIR, f"screen_{timestamp}.jpg")
+        
+        try:
+            # 1. Capture
+            screenshot = pyautogui.screenshot()
+            screenshot.thumbnail((1280, 720))
+            screenshot.save(file_path, "JPEG", quality=75, optimize=True)
             
-            # Clean up old screenshots immediately
+            # 2. Send to Backend
+            url = f"{BACKEND_URL}/process-screen"
+            with open(file_path, "rb") as f:
+                response = requests.post(url, files={"file": f}, timeout=10)
+            
+            # 3. Parse and Update
+            if response.status_code == 200:
+                result = response.json()
+                if result["status"] == "success":
+                    data = result["data"]
+                    # Schedule UI update on the main thread
+                    self.root.after(0, self.update_ui, data['guidance'], data['urgency'], data.get('action_hint'))
+            
+            # Cleanup
             if os.path.exists(file_path):
                 os.remove(file_path)
                 
+        except Exception as e:
+            print(f"Loop Error: {e}")
+            self.root.after(0, lambda: self.status_label.config(text=f"Status: Error - {str(e)[:20]}...", fg="red"))
+
+    def run_logic_loop(self):
+        """Background thread for the continuous processing loop."""
+        print("Starting background logic thread...")
+        while self.running:
+            self.capture_and_process()
             time.sleep(INTERVAL)
+
+def main():
+    root = tk.Tk()
+    app = LegacyBridgeApp(root)
+    
+    try:
+        root.mainloop()
     except KeyboardInterrupt:
-        print("\nStopping client...")
+        app.running = False
+        root.destroy()
 
 if __name__ == "__main__":
-    run_loop()
+    main()
