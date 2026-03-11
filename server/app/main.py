@@ -1,7 +1,9 @@
 import os
 import io
 import json
-import google.generativeai as genai
+import base64
+import vertexai
+from vertexai.generative_models import GenerativeModel, Part, GenerationConfig
 from fastapi import FastAPI, UploadFile, File
 from PIL import Image
 from dotenv import load_dotenv
@@ -11,11 +13,14 @@ from typing import Optional
 # Import the confusion detection module
 from app.confusion_detector import ConfusionDetector
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from root .env
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
-# Configure Gemini API
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+# Initialize Vertex AI with project and location from env or defaults
+vertexai.init(
+    project=os.getenv("GOOGLE_CLOUD_PROJECT", "legacybridge-hackathon"),
+    location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-east4")
+)
 
 # Create model - using flash for low latency
 # Gemini 2.0 Flash supports controlled JSON output
