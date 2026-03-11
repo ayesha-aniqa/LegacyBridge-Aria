@@ -3,3 +3,4 @@ pillow
 requests
 python-dotenv
 tk
+pyttsx3
