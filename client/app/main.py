@@ -66,6 +66,9 @@ class LegacyBridgeApp:
         # Track last spoken guidance to avoid repeating voice
         self.last_spoken = ""
 
+        # Adaptive poll interval — updated by backend hint
+        self.current_interval = INTERVAL
+
         # ── Start background threads ─────────────────────────────────────
         self.running = True
 
@@ -89,7 +92,7 @@ class LegacyBridgeApp:
             except Exception:
                 pass  # Never let click reporting crash the app
 
-    def update_ui(self, guidance, urgency, hint, confusion=None):
+    def update_ui(self, guidance, urgency, hint, confusion=None, response_ms=None, cache_hit=False):
         """Update all UI elements with latest data from backend."""
         # ── Guidance text ────────────────────────────────────────────────
         self.guidance_box.delete(1.0, tk.END)
@@ -109,16 +112,17 @@ class LegacyBridgeApp:
                     print(f"Voice Error: {e}")
             threading.Thread(target=speak, daemon=True).start()
 
-        # ── Urgency-based styling ────────────────────────────────────────
+        # ── Urgency-based styling + response time in status ────────────────
+        time_label = f" | {response_ms:.0f}ms{'⚡' if cache_hit else ''}" if response_ms else ""
         if urgency == "high":
             self.guidance_box.config(bg="#fff2f2")
-            self.status_label.config(text="Status: Active Help", fg="red")
+            self.status_label.config(text=f"Status: Active Help{time_label}", fg="red")
         elif urgency == "medium":
             self.guidance_box.config(bg="#fffdf2")
-            self.status_label.config(text="Status: Suggesting", fg="orange")
+            self.status_label.config(text=f"Status: Suggesting{time_label}", fg="orange")
         else:
             self.guidance_box.config(bg="#f2fff2")
-            self.status_label.config(text="Status: Monitoring", fg="green")
+            self.status_label.config(text=f"Status: Monitoring{time_label}", fg="green")
 
         # ── Confusion indicator ──────────────────────────────────────────
         if confusion and confusion.get("is_confused"):
@@ -160,10 +164,18 @@ class LegacyBridgeApp:
                 if result["status"] == "success":
                     data = result["data"]
                     confusion = result.get("confusion")
+                    response_ms = result.get("response_ms")
+                    cache_hit = result.get("cache_hit", False)
+
+                    # Adaptive interval — use backend's hint, clamp between 1 and 8s
+                    next_poll = result.get("next_poll_interval", INTERVAL)
+                    self.current_interval = max(1, min(8, next_poll))
+
                     self.root.after(
                         0, self.update_ui,
                         data["guidance"], data["urgency"],
-                        data.get("action_hint"), confusion
+                        data.get("action_hint"), confusion,
+                        response_ms, cache_hit
                     )
 
             # Cleanup screenshot
@@ -179,11 +191,11 @@ class LegacyBridgeApp:
             )
 
     def run_logic_loop(self):
-        """Background thread: continuous screenshot → process loop."""
+        """Background thread: continuous screenshot → process loop (adaptive interval)."""
         print("Starting background logic thread...")
         while self.running:
             self.capture_and_process()
-            time.sleep(INTERVAL)
+            time.sleep(self.current_interval)  # Uses adaptive interval from backend
 
 
 def main():
