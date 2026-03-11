@@ -1,7 +1,7 @@
 import os
 import io
 import json
-import google.generativeai as genai
+from google import genai
 from fastapi import FastAPI, UploadFile, File
 from PIL import Image
 from dotenv import load_dotenv
@@ -12,14 +12,7 @@ from typing import Optional
 load_dotenv()
 
 # Configure Gemini API
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-
-# Create model - using flash for low latency
-# Gemini 2.0 Flash supports controlled JSON output
-model = genai.GenerativeModel(
-    'gemini-2.0-flash',
-    generation_config={"response_mime_type": "application/json"}
-)
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
 app = FastAPI(title="LegacyBridge Backend")
 
@@ -62,14 +55,13 @@ async def process_screen(file: UploadFile = File(...)):
         image = Image.open(io.BytesIO(contents))
         
         # Prepare content for Gemini
-        prompt_parts = [
-            SYSTEM_PROMPT,
-            "Identify the current screen and tell the user what to do. Provide JSON.",
-            image
-        ]
-        
         # Generate structured response
-        response = model.generate_content(prompt_parts)
+        response = client.models.generate_content(model='gemini-2.0-flash',
+            contents=[SYSTEM_PROMPT, image],
+            config={
+                'response_mime_type': 'application/json',
+                'response_schema': AriaGuidance # Forces strict JSON format
+            })
         
         # Parse the JSON response
         try:
