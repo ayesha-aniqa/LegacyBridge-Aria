@@ -24,11 +24,11 @@ vertexai.init(
 
 # Create model - using flash for low latency
 # Gemini 2.0 Flash supports controlled JSON output
-model = genai.GenerativeModel(
+# CORRECT
+model = GenerativeModel(
     'gemini-2.0-flash',
     generation_config={"response_mime_type": "application/json"}
 )
-
 app = FastAPI(title="LegacyBridge Backend")
 
 # Initialize the confusion detector (shared state across requests)
