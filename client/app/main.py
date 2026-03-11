@@ -6,6 +6,11 @@ import threading
 import tkinter as tk
 from PIL import Image
 from dotenv import load_dotenv
+import pyttsx3
+
+engine = pyttsx3.init()
+# Slower, easier speed for elderly users
+engine.setProperty('rate', 150) 
 
 # Load environment variables
 load_dotenv()
@@ -50,6 +55,16 @@ class LegacyBridgeApp:
         self.guidance_box.insert(tk.END, guidance)
         
         self.action_label.config(text=f"Hint: {hint}" if hint else "")
+
+        # --- TO ACTIVATE VOICE ---
+        def speak():
+            try:
+                engine.say(guidance)
+                engine.runAndWait()
+            except Exception as e:
+                print(f"Voice Error: {e}")
+        
+        threading.Thread(target=speak, daemon=True).start()
         
         # Change UI color based on urgency
         if urgency == "high":
