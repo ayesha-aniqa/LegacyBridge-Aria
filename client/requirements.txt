@@ -4,3 +4,4 @@ requests
 python-dotenv
 tk
 pyttsx3
+pynput

@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Optional
 
+# Import the confusion detection module
+from app.confusion_detector import ConfusionDetector
+
 # Load environment variables from root .env
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
@@ -19,15 +22,17 @@ vertexai.init(
     location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-east4")
 )
 
-# Create Gemini 2.0 Flash model via Vertex AI — low latency, JSON output
-model = GenerativeModel(
-    "gemini-2.0-flash",
-    generation_config=GenerationConfig(
-        response_mime_type="application/json"
-    )
+# Create model - using flash for low latency
+# Gemini 2.0 Flash supports controlled JSON output
+model = genai.GenerativeModel(
+    'gemini-2.0-flash',
+    generation_config={"response_mime_type": "application/json"}
 )
 
 app = FastAPI(title="LegacyBridge Backend")
+
+# Initialize the confusion detector (shared state across requests)
+confusion_detector = ConfusionDetector()
 
 # Response Schema for structured parsing
 class AriaGuidance(BaseModel):
@@ -35,6 +40,11 @@ class AriaGuidance(BaseModel):
     urgency: str  # "low", "medium", "high"
     action_hint: Optional[str] = None  # e.g., "tap green circle"
     confidence: float
+
+# Schema for click reports from the client
+class ClickReport(BaseModel):
+    x: int
+    y: int
 
 SYSTEM_PROMPT = """
 You are Aria, a warm, patient AI assistant for the elderly.
@@ -59,32 +69,50 @@ Aria's Voice Guidelines:
 async def root():
     return {"status": "Aria is online"}
 
+@app.post("/report-click")
+async def report_click(click: ClickReport):
+    """Receives click coordinates from the client for confusion tracking."""
+    confusion_detector.record_click(click.x, click.y)
+    status = confusion_detector.evaluate()
+    return {
+        "status": "recorded",
+        "confusion": status
+    }
+
+@app.get("/confusion-status")
+async def confusion_status():
+    """Returns the current confusion detection state."""
+    status = confusion_detector.evaluate()
+    return {"confusion": status}
+
 @app.post("/process-screen")
 async def process_screen(file: UploadFile = File(...)):
-    """Receives a screenshot and processes it with Gemini Vision (Vertex AI) for JSON output."""
+    """Receives a screenshot and processes it with Gemini Vision for JSON output."""
     try:
-        # Read the uploaded image bytes
+        # Read and basic processing (ensure it's a valid image)
         contents = await file.read()
-
-        # Validate image by opening with Pillow
         image = Image.open(io.BytesIO(contents))
 
-        # Convert image to base64 for Vertex AI Part
-        buffered = io.BytesIO()
-        image.save(buffered, format="JPEG", quality=85)
-        image_bytes = buffered.getvalue()
+        # Evaluate confusion state BEFORE generating response
+        confusion_state = confusion_detector.evaluate()
 
-        # Build Vertex AI image Part
-        image_part = Part.from_data(data=image_bytes, mime_type="image/jpeg")
+        # Build the prompt — inject confusion context if detected
+        base_instruction = "Identify the current screen and tell the user what to do. Provide JSON."
+        if confusion_state["is_confused"]:
+            # Append the confusion-aware prompt modifier
+            instruction = base_instruction + confusion_state["prompt_modifier"]
+            print(f"⚠️  Confusion detected! Score: {confusion_state['score']} | Reason: {confusion_state['reason']}")
+        else:
+            instruction = base_instruction
 
-        # Prepare prompt parts for Gemini
+        # Prepare content for Gemini
         prompt_parts = [
             SYSTEM_PROMPT,
-            "Identify the current screen and tell the user what to do. Provide JSON.",
-            image_part
+            instruction,
+            image
         ]
 
-        # Generate structured response via Vertex AI
+        # Generate structured response
         response = model.generate_content(prompt_parts)
 
         # Parse the JSON response
@@ -93,9 +121,13 @@ async def process_screen(file: UploadFile = File(...)):
             aria_response = AriaGuidance(**data)
             print(f"Aria Guidance: {aria_response.guidance} (Confidence: {aria_response.confidence})")
 
+            # Record the response in the confusion detector for pattern tracking
+            confusion_detector.record_response(aria_response.guidance, aria_response.urgency)
+
             return {
                 "status": "success",
-                "data": aria_response.dict()
+                "data": aria_response.dict(),
+                "confusion": confusion_detector.get_status()
             }
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Parsing error: {e} | Raw: {response.text}")
