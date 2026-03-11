@@ -6,6 +6,7 @@ import threading
 import tkinter as tk
 from PIL import Image
 from dotenv import load_dotenv
+from pynput import mouse
 import pyttsx3
 
 engine = pyttsx3.init()
@@ -26,7 +27,7 @@ class LegacyBridgeApp:
     def __init__(self, root):
         self.root = root
         self.root.title("LegacyBridge - Aria")
-        self.root.geometry("450x350+100+100") # Positioned top-left
+        self.root.geometry("450x400+100+100") # Positioned top-left
         self.root.attributes("-topmost", True)
         self.root.overrideredirect(False) # Keep window decorations for now
         
@@ -36,6 +37,10 @@ class LegacyBridgeApp:
         
         self.status_label = tk.Label(root, text="Status: Ready", font=("Arial", 10), fg="green")
         self.status_label.pack()
+        
+        # Confusion indicator label
+        self.confusion_label = tk.Label(root, text="", font=("Arial", 9), fg="#7f8c8d")
+        self.confusion_label.pack()
         
         self.guidance_box = tk.Text(root, height=5, width=40, font=("Arial", 14), wrap=tk.WORD, bg="#f9f9f9", padx=10, pady=10)
         self.guidance_box.pack(pady=15)
@@ -49,7 +54,23 @@ class LegacyBridgeApp:
         self.thread = threading.Thread(target=self.run_logic_loop, daemon=True)
         self.thread.start()
 
-    def update_ui(self, guidance, urgency, hint):
+        # Start the mouse click listener for confusion detection
+        self.click_listener = mouse.Listener(on_click=self.on_mouse_click)
+        self.click_listener.start()
+
+    def on_mouse_click(self, x, y, button, pressed):
+        """Callback for mouse clicks — sends click position to backend for confusion tracking."""
+        if pressed:  # Only on press, not release
+            try:
+                requests.post(
+                    f"{BACKEND_URL}/report-click",
+                    json={"x": int(x), "y": int(y)},
+                    timeout=2
+                )
+            except Exception:
+                pass  # Don't let click reporting crash the app
+
+    def update_ui(self, guidance, urgency, hint, confusion=None):
         """Updates the UI elements with data from the backend."""
         self.guidance_box.delete(1.0, tk.END)
         self.guidance_box.insert(tk.END, guidance)
@@ -77,6 +98,16 @@ class LegacyBridgeApp:
             self.guidance_box.config(bg="#f2fff2") # Light green
             self.status_label.config(text="Status: Monitoring", fg="green")
 
+        # Update confusion indicator if data is available
+        if confusion and confusion.get("is_confused"):
+            score_pct = int(confusion["score"] * 100)
+            self.confusion_label.config(
+                text=f"🔴 Confusion detected ({score_pct}%) — Aria is giving extra help",
+                fg="#e74c3c"
+            )
+        else:
+            self.confusion_label.config(text="🟢 User seems comfortable", fg="#27ae60")
+
     def capture_and_process(self):
         """Single step: Capture -> Send -> Get Response."""
         timestamp = int(time.time())
@@ -98,8 +129,13 @@ class LegacyBridgeApp:
                 result = response.json()
                 if result["status"] == "success":
                     data = result["data"]
+                    confusion = result.get("confusion")
                     # Schedule UI update on the main thread
-                    self.root.after(0, self.update_ui, data['guidance'], data['urgency'], data.get('action_hint'))
+                    self.root.after(
+                        0, self.update_ui,
+                        data['guidance'], data['urgency'],
+                        data.get('action_hint'), confusion
+                    )
             
             # Cleanup
             if os.path.exists(file_path):
@@ -124,6 +160,7 @@ def main():
         root.mainloop()
     except KeyboardInterrupt:
         app.running = False
+        app.click_listener.stop()
         root.destroy()
 
 if __name__ == "__main__":
