@@ -1,187 +1,244 @@
 """
-Confusion Detection Module for LegacyBridge
----------------------------------------------
+Confusion Detection Module for LegacyBridge (Refined v2)
+----------------------------------------------------------
 Detects when an elderly user appears confused or stuck by analyzing:
-  1. Repeated clicks in the same screen area (within a radius)
+  1. Repeated clicks in the same screen area (within a configurable radius)
   2. Repeated high-urgency Gemini responses (AI thinks user is stuck)
-  3. Screen stagnation (same screen appearing multiple times in a row)
+  3. Screen stagnation (same guidance text appearing multiple times)
+  4. Rapid clicking (panic clicking — many clicks in a short burst)
+  5. Inactivity timeout (no interaction at all for extended time)
 
-When confusion is detected, Aria's prompt is augmented to give
-more proactive, reassuring guidance.
+Confusion score is a weighted float from 0.0 (calm) to 1.0 (very confused).
+When confusion is detected, a dynamic prompt modifier is built for Gemini,
+so Aria speaks with extra warmth and gives more precise, physical guidance.
 """
 
 import time
 import math
 import os
+import logging
 from collections import deque
-from dotenv import load_dotenv
+from typing import Dict, List, Tuple
 
-load_dotenv()
+logger = logging.getLogger("aria.confusion")
 
-# How many repeated signals before we flag confusion
-CONFUSION_THRESHOLD = int(os.getenv("CONFUSION_THRESHOLD", 3))
+# ─── Configuration (overridable via .env) ────────────────────────────────────
 
-# Radius in pixels — clicks within this radius count as "same area"
-CLICK_RADIUS = 80
-
-# Time window in seconds — only consider events within this window
-TIME_WINDOW = 30
+CONFUSION_THRESHOLD = int(os.getenv("CONFUSION_THRESHOLD", "3"))
+CLICK_RADIUS = int(os.getenv("CLICK_RADIUS", "80"))        # px — same-area radius
+TIME_WINDOW = int(os.getenv("CONFUSION_TIME_WINDOW", "30")) # seconds
+RAPID_CLICK_WINDOW = 3    # seconds — burst detection window
+RAPID_CLICK_COUNT = 5     # clicks in burst window to trigger
+INACTIVITY_TIMEOUT = 60   # seconds — no clicks at all
 
 
 class ConfusionDetector:
-    """Tracks user behavior signals and determines if the user is confused."""
+    """Tracks user behaviour signals and determines if the user is confused."""
 
     def __init__(self):
-        # Stores recent click positions as (x, y, timestamp)
-        self.click_history = deque(maxlen=20)
+        # (x, y, timestamp)
+        self.click_history: deque = deque(maxlen=50)
 
-        # Stores recent Gemini urgency levels as (urgency, timestamp)
-        self.urgency_history = deque(maxlen=10)
+        # (urgency_str, timestamp)
+        self.urgency_history: deque = deque(maxlen=15)
 
-        # Stores recent Gemini guidance texts to detect repetitive responses
-        self.guidance_history = deque(maxlen=10)
+        # (guidance_text, timestamp)
+        self.guidance_history: deque = deque(maxlen=15)
 
-        # Current confusion state
-        self.is_confused = False
-        self.confusion_reason = ""
-        self.confusion_score = 0.0  # 0.0 (calm) to 1.0 (very confused)
+        # Timestamp of last recorded click
+        self.last_click_time: float = time.time()
+
+        # Running state
+        self.is_confused: bool = False
+        self.confusion_score: float = 0.0
+        self.confusion_reason: str = "none"
+        self.consecutive_confused_cycles: int = 0
+
+    # ─── Recording methods (called from endpoints) ───────────────────────
 
     def record_click(self, x: int, y: int):
-        """Record a mouse click position from the client."""
+        """Record a mouse click from the client."""
         self.click_history.append((x, y, time.time()))
+        self.last_click_time = time.time()
 
     def record_response(self, guidance: str, urgency: str):
-        """Record a Gemini API response for pattern analysis."""
+        """Record a Gemini response for pattern tracking."""
         now = time.time()
         self.urgency_history.append((urgency, now))
-        self.guidance_history.append((guidance, now))
+        self.guidance_history.append((guidance.strip().lower(), now))
 
-    def _get_recent_clicks(self):
-        """Return clicks within the active time window."""
-        cutoff = time.time() - TIME_WINDOW
+    # ─── Windowed helpers ─────────────────────────────────────────────────
+
+    def _recent_clicks(self, window: float = None) -> List[Tuple[int, int, float]]:
+        cutoff = time.time() - (window or TIME_WINDOW)
         return [(x, y, t) for x, y, t in self.click_history if t > cutoff]
 
-    def _get_recent_urgencies(self):
-        """Return urgency records within the active time window."""
+    def _recent_urgencies(self) -> List[str]:
         cutoff = time.time() - TIME_WINDOW
-        return [(u, t) for u, t in self.urgency_history if t > cutoff]
+        return [u for u, t in self.urgency_history if t > cutoff]
 
-    def _check_repeated_clicks(self) -> bool:
-        """Detect if user clicked the same area multiple times (they're stuck)."""
-        recent = self._get_recent_clicks()
+    def _recent_guidances(self) -> List[str]:
+        cutoff = time.time() - TIME_WINDOW
+        return [g for g, t in self.guidance_history if t > cutoff]
+
+    # ─── Detection checks ────────────────────────────────────────────────
+
+    def _check_repeated_clicks(self) -> float:
+        """User clicking same spot repeatedly → weight 0.35"""
+        recent = self._recent_clicks()
         if len(recent) < CONFUSION_THRESHOLD:
-            return False
+            return 0.0
 
-        # Check if the last N clicks are all within CLICK_RADIUS of each other
-        last_clicks = recent[-CONFUSION_THRESHOLD:]
-        center_x = sum(c[0] for c in last_clicks) / len(last_clicks)
-        center_y = sum(c[1] for c in last_clicks) / len(last_clicks)
+        last_n = recent[-CONFUSION_THRESHOLD:]
+        cx = sum(c[0] for c in last_n) / len(last_n)
+        cy = sum(c[1] for c in last_n) / len(last_n)
 
         all_close = all(
-            math.sqrt((c[0] - center_x) ** 2 + (c[1] - center_y) ** 2) <= CLICK_RADIUS
-            for c in last_clicks
+            math.hypot(c[0] - cx, c[1] - cy) <= CLICK_RADIUS
+            for c in last_n
         )
-        return all_close
+        return 0.35 if all_close else 0.0
 
-    def _check_repeated_urgency(self) -> bool:
-        """Detect if Gemini has been returning 'high' urgency repeatedly."""
-        recent = self._get_recent_urgencies()
+    def _check_rapid_clicks(self) -> float:
+        """Panic clicking — many fast clicks in a short burst → weight 0.20"""
+        recent = self._recent_clicks(window=RAPID_CLICK_WINDOW)
+        return 0.20 if len(recent) >= RAPID_CLICK_COUNT else 0.0
+
+    def _check_repeated_urgency(self) -> float:
+        """Gemini keeps saying high urgency → weight 0.20"""
+        recent = self._recent_urgencies()
         if len(recent) < CONFUSION_THRESHOLD:
-            return False
+            return 0.0
+        last_n = recent[-CONFUSION_THRESHOLD:]
+        return 0.20 if all(u == "high" for u in last_n) else 0.0
 
-        last_urgencies = [u for u, t in recent[-CONFUSION_THRESHOLD:]]
-        return all(u == "high" for u in last_urgencies)
-
-    def _check_repeated_guidance(self) -> bool:
-        """Detect if Gemini keeps giving the same guidance (screen hasn't changed)."""
-        cutoff = time.time() - TIME_WINDOW
-        recent = [g for g, t in self.guidance_history if t > cutoff]
+    def _check_screen_stagnation(self) -> float:
+        """Same guidance repeated (user hasn't progressed) → weight 0.15"""
+        recent = self._recent_guidances()
         if len(recent) < CONFUSION_THRESHOLD:
-            return False
+            return 0.0
+        last_n = recent[-CONFUSION_THRESHOLD:]
+        return 0.15 if len(set(last_n)) == 1 else 0.0
 
-        last_guidances = recent[-CONFUSION_THRESHOLD:]
-        # If all recent guidances are identical, user hasn't progressed
-        return len(set(last_guidances)) == 1
+    def _check_inactivity(self) -> float:
+        """No clicks for a long time (user might be frozen) → weight 0.10"""
+        elapsed = time.time() - self.last_click_time
+        return 0.10 if elapsed > INACTIVITY_TIMEOUT else 0.0
 
-    def evaluate(self) -> dict:
+    # ─── Main evaluation ─────────────────────────────────────────────────
+
+    def evaluate(self) -> Dict:
         """
-        Run all confusion checks and return the current confusion state.
-        Returns a dict with: is_confused, score, reason, prompt_modifier
+        Run all confusion checks. Returns dict with:
+          is_confused, score, reason, prompt_modifier
         """
-        reasons = []
-        score = 0.0
+        checks = {
+            "repeated_clicks":  self._check_repeated_clicks(),
+            "rapid_clicks":     self._check_rapid_clicks(),
+            "high_urgency":     self._check_repeated_urgency(),
+            "screen_stagnation": self._check_screen_stagnation(),
+            "inactivity":       self._check_inactivity(),
+        }
 
-        # Check 1: Repeated clicks in same area
-        if self._check_repeated_clicks():
-            reasons.append("repeated_clicks")
-            score += 0.4
+        score = min(sum(checks.values()), 1.0)
+        triggered = [k for k, v in checks.items() if v > 0]
 
-        # Check 2: Gemini keeps saying urgency is high
-        if self._check_repeated_urgency():
-            reasons.append("repeated_high_urgency")
-            score += 0.3
-
-        # Check 3: Same guidance being given (user stuck on same screen)
-        if self._check_repeated_guidance():
-            reasons.append("screen_stagnation")
-            score += 0.3
-
-        # Clamp score to 1.0
-        score = min(score, 1.0)
-
-        self.is_confused = score >= 0.3
         self.confusion_score = score
-        self.confusion_reason = ", ".join(reasons) if reasons else "none"
+        self.is_confused = score >= 0.20
+        self.confusion_reason = ", ".join(triggered) if triggered else "none"
 
-        # Build the prompt modifier for Gemini when confusion is detected
+        # Track how many consecutive cycles showed confusion
+        if self.is_confused:
+            self.consecutive_confused_cycles += 1
+        else:
+            self.consecutive_confused_cycles = 0
+
         prompt_modifier = ""
         if self.is_confused:
-            prompt_modifier = self._build_prompt_modifier(reasons)
+            prompt_modifier = self._build_prompt_modifier(triggered)
+            logger.info(
+                "⚠️  Confusion detected | score=%.2f | reasons=%s | streak=%d",
+                score, self.confusion_reason, self.consecutive_confused_cycles
+            )
 
         return {
             "is_confused": self.is_confused,
             "score": round(self.confusion_score, 2),
             "reason": self.confusion_reason,
+            "streak": self.consecutive_confused_cycles,
             "prompt_modifier": prompt_modifier
         }
 
-    def _build_prompt_modifier(self, reasons: list) -> str:
-        """Generate an extra prompt injection when confusion is detected."""
+    # ─── Dynamic prompt modifier ─────────────────────────────────────────
+
+    def _build_prompt_modifier(self, reasons: List[str]) -> str:
+        """Build extra prompt context for Gemini when user seems confused."""
         parts = [
-            "\n⚠️ CONFUSION DETECTED — The user appears to be struggling."
+            "\n⚠️ CONFUSION ALERT — The user appears to be struggling. Adjust your response:"
         ]
 
         if "repeated_clicks" in reasons:
             parts.append(
-                "They have been tapping the same spot repeatedly. "
-                "They may not know where to look next. "
-                "Point them to the EXACT visual element with color and position."
+                "• They tapped the SAME spot multiple times. They can't find the right button. "
+                "Describe the EXACT visual target using color, shape, and screen position (top/bottom/left/right)."
             )
 
-        if "repeated_high_urgency" in reasons:
+        if "rapid_clicks" in reasons:
             parts.append(
-                "Multiple consecutive responses have been high urgency. "
-                "Slow down your guidance. Be extra patient and reassuring."
+                "• They are clicking very rapidly — this signals frustration or panic. "
+                "Start your response with something calming like 'It's okay, let's slow down together.'"
+            )
+
+        if "high_urgency" in reasons:
+            parts.append(
+                "• You have flagged high urgency multiple times in a row. "
+                "The user has not recovered. Offer a DIFFERENT, simpler instruction than before."
             )
 
         if "screen_stagnation" in reasons:
             parts.append(
-                "The screen has not changed for several cycles. "
-                "The user may be frozen or unsure what to do. "
-                "Offer a very simple, single next step."
+                "• The screen hasn't changed — your previous guidance didn't work. "
+                "Try a completely different approach. Describe the physical action step-by-step."
+            )
+
+        if "inactivity" in reasons:
+            parts.append(
+                "• The user has stopped interacting entirely. They may be frozen or confused. "
+                "Gently ask if they need help: 'Are you still there? I'm here whenever you're ready.'"
+            )
+
+        # Escalation — if confused for many cycles, get even more direct
+        if self.consecutive_confused_cycles >= 5:
+            parts.append(
+                "🚨 EXTENDED CONFUSION: The user has been stuck for over 5 cycles. "
+                "Give the MOST direct, single-action instruction possible. "
+                "Example: 'Put your finger on the big green circle at the very bottom of the screen.'"
             )
 
         parts.append(
-            "Use an EXTRA warm tone. Start with something reassuring like "
-            "'Don't worry, I'm right here with you.' Keep it under 15 words."
+            "Use an EXTRA warm, grandchild-like tone. Keep guidance under 15 words."
         )
 
-        return " ".join(parts)
+        return "\n".join(parts)
 
-    def get_status(self) -> dict:
-        """Return the current confusion status for API responses."""
+    # ─── Status for API ──────────────────────────────────────────────────
+
+    def get_status(self) -> Dict:
+        """Return confusion status for API responses."""
         return {
             "is_confused": self.is_confused,
             "score": round(self.confusion_score, 2),
-            "reason": self.confusion_reason
+            "reason": self.confusion_reason,
+            "streak": self.consecutive_confused_cycles
         }
+
+    def reset(self):
+        """Manually reset confusion state (e.g. when user says they're okay)."""
+        self.click_history.clear()
+        self.urgency_history.clear()
+        self.guidance_history.clear()
+        self.is_confused = False
+        self.confusion_score = 0.0
+        self.confusion_reason = "none"
+        self.consecutive_confused_cycles = 0
+        self.last_click_time = time.time()
