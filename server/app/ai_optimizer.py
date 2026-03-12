@@ -18,25 +18,25 @@ from typing import Optional, Tuple
 logger = logging.getLogger("aria.ai_optimizer")
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-MAX_GUIDANCE_WORDS = 15
-VALID_URGENCIES = {"low", "medium", "high"}
+MAX_GUIDANCE_WORDS = 25
+VALID_URGENCIES = {"low", "medium", "high", "low", "medium", "high"} # Case insensitive check
 DEFAULT_FALLBACK_RESPONSE = {
     "guidance": "I'm here to help. Take your time.",
-    "urgency": "low",
-    "action_hint": None,
-    "confidence": 0.5,
-    "screen_context": "unknown"
+    "urgency": "LOW",
+    "poll_interval_hint": 4,
+    "confusion_assessment": "User seems calm",
+    "visual_target": None
 }
 
 # ─── Simplified retry prompt ─────────────────────────────────────────────────
 RETRY_PROMPT = """
 You are a helpful assistant. Respond ONLY with this exact JSON and nothing else:
 {
-  "guidance": "One short sentence (under 15 words) telling the user what to do.",
-  "urgency": "low",
-  "action_hint": null,
-  "confidence": 0.8,
-  "screen_context": "unknown"
+  "guidance": "One short sentence telling the user what to do.",
+  "urgency": "LOW",
+  "poll_interval_hint": 2,
+  "confusion_assessment": "Stuck",
+  "visual_target": null
 }
 """
 
@@ -56,20 +56,16 @@ def validate_response(data: dict) -> Tuple[bool, list]:
 
     if "urgency" not in data:
         errors.append("Missing 'urgency' field")
-    elif data["urgency"] not in VALID_URGENCIES:
-        errors.append(f"Invalid urgency '{data['urgency']}' — must be low/medium/high")
+    elif str(data["urgency"]).lower() not in {"low", "medium", "high"}:
+        errors.append(f"Invalid urgency '{data['urgency']}' — must be LOW/MEDIUM/HIGH")
 
-    if "confidence" not in data:
-        errors.append("Missing 'confidence' field")
-    elif not isinstance(data["confidence"], (float, int)):
-        errors.append("'confidence' must be a number")
-    elif not (0.0 <= float(data["confidence"]) <= 1.0):
-        errors.append(f"'confidence' {data['confidence']} out of range [0.0, 1.0]")
+    if "poll_interval_hint" not in data:
+        errors.append("Missing 'poll_interval_hint' field")
+    elif not isinstance(data["poll_interval_hint"], (int, float)):
+        errors.append("'poll_interval_hint' must be a number")
 
-    # Optional field checks
-    if "action_hint" in data and data["action_hint"] is not None:
-        if not isinstance(data["action_hint"], str):
-            errors.append("'action_hint' must be a string or null")
+    if "confusion_assessment" not in data:
+        errors.append("Missing 'confusion_assessment' field")
 
     return len(errors) == 0, errors
 
@@ -78,34 +74,27 @@ def sanitize_response(data: dict) -> dict:
     """
     Clean up a Gemini response — fix minor issues without rejecting it:
     - Trim guidance to max word count
-    - Normalize urgency to lowercase
-    - Clamp confidence to [0.0, 1.0]
-    - Ensure screen_context is present
+    - Normalize urgency to uppercase
+    - Ensure all expected fields are present
     """
     # Trim guidance to word limit
     if "guidance" in data and isinstance(data["guidance"], str):
         words = data["guidance"].split()
         if len(words) > MAX_GUIDANCE_WORDS:
             data["guidance"] = " ".join(words[:MAX_GUIDANCE_WORDS])
-            logger.debug("Trimmed guidance from %d to %d words", len(words), MAX_GUIDANCE_WORDS)
 
-    # Normalize urgency
+    # Normalize urgency to UPPERCASE as per GEMINI.md
     if "urgency" in data:
-        data["urgency"] = str(data["urgency"]).lower()
-        if data["urgency"] not in VALID_URGENCIES:
-            logger.warning("Invalid urgency '%s' → defaulting to 'low'", data["urgency"])
-            data["urgency"] = "low"
-
-    # Clamp confidence
-    if "confidence" in data:
-        try:
-            data["confidence"] = round(max(0.0, min(1.0, float(data["confidence"]))), 2)
-        except (TypeError, ValueError):
-            data["confidence"] = 0.5
+        val = str(data["urgency"]).upper()
+        if val in {"LOW", "MEDIUM", "HIGH"}:
+            data["urgency"] = val
+        else:
+            data["urgency"] = "LOW"
 
     # Ensure all expected fields are present
-    data.setdefault("action_hint", None)
-    data.setdefault("screen_context", "unknown")
+    data.setdefault("poll_interval_hint", 2)
+    data.setdefault("confusion_assessment", "unknown")
+    data.setdefault("visual_target", None)
 
     return data
 

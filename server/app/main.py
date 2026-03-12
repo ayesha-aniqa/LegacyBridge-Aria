@@ -24,7 +24,7 @@ from typing import Optional, List
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part, GenerationConfig
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -107,9 +107,9 @@ _stats = {"total_requests": 0, "cache_hits": 0, "gemini_calls": 0, "total_ms": 0
 class AriaGuidance(BaseModel):
     guidance: str
     urgency: str
-    action_hint: Optional[str] = None
-    confidence: float
-    screen_context: Optional[str] = None
+    poll_interval_hint: int
+    confusion_assessment: str
+    visual_target: Optional[str] = None
 
 class ClickReport(BaseModel):
     x: int
@@ -117,40 +117,30 @@ class ClickReport(BaseModel):
 
 # ─── System Prompt ───────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """
-You are **Aria**, a warm, patient AI assistant designed to help elderly people
-use their phones and computers. You watch their screen and give simple,
-spoken guidance — like a kind grandchild sitting beside them.
+You are Aria, a warm and patient AI assistant helping elderly users navigate their devices.
 
-## Your Personality
-- Calm, warm, encouraging. Never frustrated.
-- Use simple everyday words. No tech jargon.
-- If the user seems fine, just say something reassuring ("You're doing great!").
+PERSONA RULES:
+- Speak like a kind, calm grandchild — never condescending
+- Use short sentences. One instruction at a time.
+- Never use: click, URL, browser, app, API, icon, interface, menu, navigate, cursor
+- Instead use: "the green circle", "the words at the top", "the big blue button on the left"
+- Always be encouraging. Never make the user feel stupid.
+- If unsure what the user wants, ask ONE simple question.
 
-## Response Format — ALWAYS valid JSON:
+RESPONSE FORMAT (return strict JSON):
 {
-  "guidance": "One short, clear sentence (max 15 words). This will be spoken aloud.",
-  "urgency": "low | medium | high",
-  "action_hint": "Physical description of what to do next (color, shape, position on screen). Null if not needed.",
-  "confidence": 0.0 to 1.0,
-  "screen_context": "Brief label of what app or screen you see (e.g. 'WhatsApp chat list', 'Home screen', 'Settings')"
+  "guidance": "Your spoken guidance here. One or two sentences max.",
+  "urgency": "LOW | MEDIUM | HIGH",
+  "poll_interval_hint": 2,
+  "confusion_assessment": "Brief note on whether user seems stuck",
+  "visual_target": "Optional: describe exact screen location of key element"
 }
 
-## Language Rules
-- NEVER use: app, icon, click, tap, swipe, scroll, menu, settings, toggle, URL, browser
-- INSTEAD use: "the green circle", "the words at the top", "touch the picture",
-  "move your finger up on the screen", "the big blue square"
-- Describe by COLOR, SHAPE, POSITION (top/bottom/left/right/center)
-
-## Urgency Rules
-- **low**: User seems fine, screen looks normal, no action needed
-- **medium**: User might need a nudge (e.g. a dialog box appeared, or a new screen)
-- **high**: User is clearly stuck (error message, wrong screen, confusion detected)
-
-## Important
-- If the screen looks like a normal desktop or home screen with nothing happening,
-  set urgency to "low" and say something encouraging.
-- If you see an error dialog or popup, set urgency to "high" and explain what happened simply.
-- NEVER repeat the exact same guidance twice in a row.
+SCREEN ANALYSIS RULES:
+- Describe what you see plainly before deciding on guidance
+- If an error dialog is visible and unaddressed, urgency is HIGH
+- If the screen looks normal with no clear user goal, urgency is LOW
+- If the user appears mid-task but stuck, urgency is MEDIUM
 """
 
 # ─── Cache helpers ────────────────────────────────────────────────────────────
@@ -245,11 +235,14 @@ async def reset_confusion():
     return {"status": "reset", "confusion": confusion_detector.get_status()}
 
 @app.post("/process-screen")
-async def process_screen(file: UploadFile = File(...)):
+async def process_screen(
+    file: UploadFile = File(...),
+    movement: Optional[str] = Form(None)
+):
     """
     Optimised screen processing pipeline:
       1. Async image processing (thread pool)
-      2. Perceptual hash → cache lookup (skip Gemini if screen unchanged)
+      2. Perceptual hash → record in confusion detector + cache lookup
       3. Confusion-aware prompt injection
       4. Async Gemini call with timeout
       5. Response caching + anti-repetition
@@ -265,8 +258,16 @@ async def process_screen(file: UploadFile = File(...)):
         _, image_bytes, phash = await process_image_async(raw_bytes)
         t_image = time.perf_counter()
 
-        # ── 2. Cache lookup ───────────────────────────────────────────────
-        # Only use cache when confusion is not active (confused user needs fresh response)
+        # ── 2. Confusion state & Cache lookup ─────────────────────────────
+        # Record phash and movement data
+        confusion_detector.record_phash(phash)
+        if movement:
+            try:
+                move_points = json.loads(movement)
+                confusion_detector.record_movement(move_points)
+            except Exception as e:
+                logger.error("Failed to parse movement data: %s", e)
+
         confusion_state = confusion_detector.evaluate()
         cached = _cache_get(phash) if not confusion_state["is_confused"] else None
 
@@ -339,12 +340,12 @@ async def process_screen(file: UploadFile = File(...)):
             _recent_guidances = _recent_guidances[-_MAX_RECENT:]
 
         # ── 6. Adaptive poll interval hint ────────────────────────────────
-        if aria_dict["urgency"] == "high" or confusion_state["is_confused"]:
+        # Use Gemini's hint if provided, otherwise fallback to urgency-based
+        next_poll = aria_dict.get("poll_interval_hint", 2)
+        
+        # Override if confusion is active to ensure responsiveness
+        if confusion_state["is_confused"] or aria_dict["urgency"].lower() == "high":
             next_poll = 1
-        elif aria_dict["urgency"] == "medium":
-            next_poll = 2
-        else:
-            next_poll = 4
 
         elapsed_ms = round((time.perf_counter() - t_start) * 1000, 1)
         _stats["total_ms"] += elapsed_ms

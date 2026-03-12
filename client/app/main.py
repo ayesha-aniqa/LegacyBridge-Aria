@@ -1,5 +1,6 @@
 import time
 import os
+import json
 import requests
 import pyautogui
 import threading
@@ -69,6 +70,10 @@ class LegacyBridgeApp:
         # Adaptive poll interval — updated by backend hint
         self.current_interval = INTERVAL
 
+        # Mouse movement tracking
+        self.movement_buffer = []
+        self.last_move_recorded = 0
+
         # ── Start background threads ─────────────────────────────────────
         self.running = True
 
@@ -76,9 +81,12 @@ class LegacyBridgeApp:
         self.thread = threading.Thread(target=self.run_logic_loop, daemon=True)
         self.thread.start()
 
-        # Mouse click listener for confusion detection
-        self.click_listener = mouse.Listener(on_click=self.on_mouse_click)
-        self.click_listener.start()
+        # Mouse listener for confusion detection (clicks + moves)
+        self.mouse_listener = mouse.Listener(
+            on_click=self.on_mouse_click,
+            on_move=self.on_mouse_move
+        )
+        self.mouse_listener.start()
 
     def on_mouse_click(self, x, y, button, pressed):
         """Send every mouse press to backend for confusion tracking."""
@@ -91,6 +99,16 @@ class LegacyBridgeApp:
                 )
             except Exception:
                 pass  # Never let click reporting crash the app
+
+    def on_mouse_move(self, x, y):
+        """Record mouse movement with throttling (max 10 samples per second)."""
+        now = time.time()
+        if now - self.last_move_recorded > 0.1:  # 100ms throttle
+            self.movement_buffer.append((int(x), int(y), now))
+            self.last_move_recorded = now
+            # Keep buffer sane
+            if len(self.movement_buffer) > 500:
+                self.movement_buffer.pop(0)
 
     def update_ui(self, guidance, urgency, hint, confusion=None, response_ms=None, cache_hit=False):
         """Update all UI elements with latest data from backend."""
@@ -151,10 +169,14 @@ class LegacyBridgeApp:
             screenshot.save(file_path, "JPEG", quality=75, optimize=True)
 
             # 2. Send to backend
+            movement_data = json.dumps(self.movement_buffer)
+            self.movement_buffer = []  # Clear buffer after taking snapshot
+
             with open(file_path, "rb") as f:
                 response = requests.post(
                     f"{BACKEND_URL}/process-screen",
                     files={"file": f},
+                    data={"movement": movement_data},
                     timeout=15
                 )
 
@@ -174,7 +196,7 @@ class LegacyBridgeApp:
                     self.root.after(
                         0, self.update_ui,
                         data["guidance"], data["urgency"],
-                        data.get("action_hint"), confusion,
+                        data.get("visual_target"), confusion,
                         response_ms, cache_hit
                     )
 
