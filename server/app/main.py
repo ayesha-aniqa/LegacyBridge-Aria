@@ -1,5 +1,5 @@
 """
-LegacyBridge Backend — Optimised Server v3
+LegacyBridge Backend — Optimised Server v4
 -------------------------------------------
 Speed optimisations applied in this version:
   1. Perceptual image hashing — skip Gemini call if screen hasn't changed (cache hit)
@@ -8,6 +8,8 @@ Speed optimisations applied in this version:
   4. Adaptive poll interval hint — tells client to slow down when urgency is low
   5. Timing metrics — every response includes server-side latency breakdown
   6. Gemini call timeout — prevents hanging requests from blocking the server
+  7. Warm-up call on startup — eliminates cold start on first real user request
+  8. Auto-retry with simplified prompt + response sanitizer
 """
 
 import os
@@ -30,6 +32,7 @@ from PIL import Image
 
 from app.confusion_detector import ConfusionDetector
 from app.image_utils import process_image_async, is_similar
+from app.ai_optimizer import WarmUpManager, parse_with_retry, sanitize_response, RETRY_PROMPT
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -60,8 +63,8 @@ model = GenerativeModel(
 # ─── FastAPI app ─────────────────────────────────────────────────────────────
 app = FastAPI(
     title="LegacyBridge Backend",
-    description="Aria — AI screen assistant for elderly users (Optimised v3)",
-    version="3.0.0"
+    description="Aria — AI screen assistant for elderly users (Optimised v4)",
+    version="4.0.0"
 )
 
 app.add_middleware(
@@ -70,6 +73,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Warm-up manager ─────────────────────────────────────────────────────────
+warmup_manager = WarmUpManager()
+
+@app.on_event("startup")
+async def on_startup():
+    """Fire a warm-up Gemini call so the first real user request is fast."""
+    await warmup_manager.warmup(model, SYSTEM_PROMPT)
 
 # ─── Shared state ─────────────────────────────────────────────────────────────
 confusion_detector = ConfusionDetector()
@@ -306,42 +317,42 @@ async def process_screen(file: UploadFile = File(...)):
         t_post_gemini = time.perf_counter()
         gemini_ms = round((t_post_gemini - t_pre_gemini) * 1000, 1)
 
-        # ── 5. Parse response ─────────────────────────────────────────────
-        try:
-            data = json.loads(response_text)
-            aria = AriaGuidance(**data)
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error("Parse error: %s | Raw: %s", e, response_text[:200])
-            return {"status": "error", "message": "Failed to parse Aria's response", "raw": response_text}
+        # ── 5. Parse response (with auto-retry + sanitize) ───────────────
+        async def _retry_call():
+            """Simplified retry prompt if first parse fails."""
+            return await _call_gemini(image_bytes, RETRY_PROMPT)
 
-        # Record in confusion detector (background — don't add to latency)
-        confusion_detector.record_response(aria.guidance, aria.urgency)
+        aria_dict = await parse_with_retry(response_text, _retry_call)
+        if aria_dict is None:
+            return {"status": "error", "message": "Failed to parse Aria's response"}
+
+        # Record in confusion detector
+        confusion_detector.record_response(aria_dict["guidance"], aria_dict["urgency"])
 
         # Update caches
         _last_phash = phash
-        _last_urgency = aria.urgency
-        aria_dict = aria.dict()
+        _last_urgency = aria_dict["urgency"]
         _cache_set(phash, aria_dict)
 
-        _recent_guidances.append(aria.guidance)
+        _recent_guidances.append(aria_dict["guidance"])
         if len(_recent_guidances) > _MAX_RECENT:
             _recent_guidances = _recent_guidances[-_MAX_RECENT:]
 
         # ── 6. Adaptive poll interval hint ────────────────────────────────
-        # Tell the client how long to wait before the next screenshot
-        if aria.urgency == "high" or confusion_state["is_confused"]:
-            next_poll = 1   # Check rapidly when user needs help
-        elif aria.urgency == "medium":
+        if aria_dict["urgency"] == "high" or confusion_state["is_confused"]:
+            next_poll = 1
+        elif aria_dict["urgency"] == "medium":
             next_poll = 2
         else:
-            next_poll = 4   # Slow down when everything looks fine
+            next_poll = 4
 
         elapsed_ms = round((time.perf_counter() - t_start) * 1000, 1)
         _stats["total_ms"] += elapsed_ms
 
         logger.info(
             "🗣️  Aria: \"%s\" | urgency=%s | conf=%.2f | gemini=%.0fms | total=%.0fms",
-            aria.guidance, aria.urgency, aria.confidence, gemini_ms, elapsed_ms
+            aria_dict["guidance"], aria_dict["urgency"],
+            aria_dict.get("confidence", 0), gemini_ms, elapsed_ms
         )
 
         return {
@@ -351,7 +362,8 @@ async def process_screen(file: UploadFile = File(...)):
             "cache_hit": False,
             "response_ms": elapsed_ms,
             "gemini_ms": gemini_ms,
-            "next_poll_interval": next_poll
+            "next_poll_interval": next_poll,
+            "warmup": warmup_manager.get_status()
         }
 
     except Exception as e:
