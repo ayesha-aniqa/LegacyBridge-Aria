@@ -33,6 +33,7 @@ from PIL import Image
 from app.confusion_detector import ConfusionDetector
 from app.image_utils import process_image_async, is_similar
 from app.ai_optimizer import WarmUpManager, parse_with_retry, sanitize_response, RETRY_PROMPT
+from app.adk_wrapper import LegacyBridgeAgent
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -84,6 +85,7 @@ async def on_startup():
 
 # ─── Shared state ─────────────────────────────────────────────────────────────
 confusion_detector = ConfusionDetector()
+aria_agent = LegacyBridgeAgent(model, SYSTEM_PROMPT)
 
 # LRU-style response cache: maps image phash → (aria_response_dict, timestamp)
 # Holds up to 10 unique screens — evicts oldest when full
@@ -99,6 +101,10 @@ _last_urgency: str = "low"
 _recent_guidances: List[str] = []
 _MAX_RECENT = 5
 
+# Screen history context (Short-term memory)
+_recent_descriptions: List[str] = []
+_MAX_HISTORY = 3
+
 # Request timing stats (reset on each /health call)
 _stats = {"total_requests": 0, "cache_hits": 0, "gemini_calls": 0, "total_ms": 0}
 
@@ -110,10 +116,14 @@ class AriaGuidance(BaseModel):
     poll_interval_hint: int
     confusion_assessment: str
     visual_target: Optional[str] = None
+    screen_description: Optional[str] = None # Added for short-term memory context
 
 class ClickReport(BaseModel):
     x: int
     y: int
+
+class VoiceInput(BaseModel):
+    text: str
 
 # ─── System Prompt ───────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """
@@ -133,11 +143,13 @@ RESPONSE FORMAT (return strict JSON):
   "urgency": "LOW | MEDIUM | HIGH",
   "poll_interval_hint": 2,
   "confusion_assessment": "Brief note on whether user seems stuck",
-  "visual_target": "Optional: describe exact screen location of key element"
+  "visual_target": "Optional: coordinates as '[y, x]' where [0, 0] is top-left and [1000, 1000] is bottom-right",
+  "screen_description": "A 1-sentence description of the current screen for your own memory"
 }
 
 SCREEN ANALYSIS RULES:
 - Describe what you see plainly before deciding on guidance
+- If an element is the clear next step, provide its [y, x] coordinates in visual_target
 - If an error dialog is visible and unaddressed, urgency is HIGH
 - If the screen looks normal with no clear user goal, urgency is LOW
 - If the user appears mid-task but stuck, urgency is MEDIUM
@@ -169,23 +181,18 @@ def _cache_set(phash: str, response_dict: dict):
 
 async def _call_gemini(image_bytes: bytes, instruction: str) -> str:
     """
-    Call Gemini Vision in a thread pool with a timeout.
-    Raises asyncio.TimeoutError if Gemini takes > 12 seconds.
+    Call Gemini Vision via the LegacyBridgeAgent wrapper.
     """
-    image_part = Part.from_data(data=image_bytes, mime_type="image/jpeg")
-    prompt_parts = [SYSTEM_PROMPT, instruction, image_part]
-
-    loop = asyncio.get_event_loop()
-
-    def _sync_call():
-        return model.generate_content(prompt_parts)
-
-    # Run the blocking Gemini call in the thread pool with a 12-second timeout
-    response = await asyncio.wait_for(
-        loop.run_in_executor(None, _sync_call),
-        timeout=12.0
-    )
-    return response.text
+    try:
+        # The agent handles the multimodal reasoning loop
+        response_text = await asyncio.wait_for(
+            aria_agent.analyze_and_act(image_bytes, instruction),
+            timeout=12.0
+        )
+        return response_text
+    except asyncio.TimeoutError:
+        logger.error("⏱️  Agent timeout after 12s")
+        raise asyncio.TimeoutError
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
@@ -234,6 +241,14 @@ async def reset_confusion():
     confusion_detector.reset()
     return {"status": "reset", "confusion": confusion_detector.get_status()}
 
+@app.post("/voice-input")
+async def voice_input(input_data: VoiceInput):
+    """Handle voice commands from the user."""
+    logger.info("🎤 Voice input: %s", input_data.text)
+    # In a full implementation, this would trigger an immediate Gemini call 
+    # with the voice command as a high-priority instruction.
+    return {"status": "received", "command": input_data.text}
+
 @app.post("/process-screen")
 async def process_screen(
     file: UploadFile = File(...),
@@ -248,7 +263,7 @@ async def process_screen(
       5. Response caching + anti-repetition
       6. Adaptive poll interval in response
     """
-    global _last_phash, _last_urgency, _recent_guidances
+    global _last_phash, _last_urgency, _recent_guidances, _recent_descriptions
     t_start = time.perf_counter()
     _stats["total_requests"] += 1
 
@@ -288,7 +303,7 @@ async def process_screen(
                 "next_poll_interval": 4  # seconds — hint to client to poll less often
             }
 
-        # ── 3. Build instruction with confusion + anti-repetition ─────────
+        # ── 3. Build instruction with confusion + anti-repetition + history ──
         instruction = "Analyze this screenshot and guide the elderly user. Respond in JSON."
 
         if confusion_state["is_confused"]:
@@ -305,6 +320,10 @@ async def process_screen(
                 f"\n\nDo NOT repeat these recent guidances: [{recent_text}]. "
                 "Say something new or rephrase."
             )
+
+        if _recent_descriptions:
+            history_text = " -> ".join(_recent_descriptions)
+            instruction += f"\n\nSCREEN HISTORY (Recent to oldest): {history_text}"
 
         # ── 4. Call Gemini (async + timeout) ─────────────────────────────
         t_pre_gemini = time.perf_counter()
@@ -329,6 +348,12 @@ async def process_screen(
 
         # Record in confusion detector
         confusion_detector.record_response(aria_dict["guidance"], aria_dict["urgency"])
+
+        # Update history
+        if "screen_description" in aria_dict and aria_dict["screen_description"]:
+            _recent_descriptions.insert(0, aria_dict["screen_description"])
+            if len(_recent_descriptions) > _MAX_HISTORY:
+                _recent_descriptions.pop()
 
         # Update caches
         _last_phash = phash

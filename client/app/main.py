@@ -7,12 +7,12 @@ import threading
 import tkinter as tk
 from PIL import Image
 from dotenv import load_dotenv
-from pynput import mouse
-import pyttsx3
+from pynput import mouse, keyboard
 
-engine = pyttsx3.init()
-# Slower, easier speed for elderly users
-engine.setProperty('rate', 140)
+# New multimodality components
+from tts_helper import AriaTTS
+from visual_overlay import VisualOverlay
+from voice_input import AriaVoiceInput
 
 # Load environment variables
 load_dotenv()
@@ -28,9 +28,15 @@ class LegacyBridgeApp:
     def __init__(self, root):
         self.root = root
         self.root.title("LegacyBridge - Aria")
-        self.root.geometry("450x420+100+100")
+        self.root.geometry("450x480+100+100")
         self.root.attributes("-topmost", True)
         self.root.overrideredirect(False)
+
+        # ── Multimodality Components ─────────────────────────────────────
+        self.tts = AriaTTS()
+        self.visual_overlay = VisualOverlay(self.root)
+        self.voice_input = AriaVoiceInput(callback=self.handle_voice_command)
+        self.voice_input.start_listening()
 
         # ── UI Elements ──────────────────────────────────────────────────
         self.title_label = tk.Label(
@@ -58,6 +64,23 @@ class LegacyBridgeApp:
         )
         self.guidance_box.pack(pady=10)
         self.guidance_box.insert(tk.END, "I'm here to help. Just use your computer normally.")
+
+        # Interrupt / Mute Controls
+        self.controls_frame = tk.Frame(root)
+        self.controls_frame.pack(pady=5)
+
+        self.is_muted = False
+        self.mute_btn = tk.Button(
+            self.controls_frame, text="🔇 Mute Aria", command=self.toggle_mute,
+            bg="#ecf0f1", font=("Arial", 10)
+        )
+        self.mute_btn.pack(side=tk.LEFT, padx=5)
+
+        self.stop_btn = tk.Button(
+            self.controls_frame, text="🛑 Stop Speaking (ESC)", command=self.stop_tts,
+            bg="#fadbd8", font=("Arial", 10)
+        )
+        self.stop_btn.pack(side=tk.LEFT, padx=5)
 
         self.action_label = tk.Label(
             root, text="", font=("Arial", 12, "italic"), fg="#e67e22"
@@ -87,6 +110,38 @@ class LegacyBridgeApp:
             on_move=self.on_mouse_move
         )
         self.mouse_listener.start()
+
+        # Keyboard listener for ESC to stop TTS
+        self.key_listener = keyboard.Listener(on_press=self.on_key_press)
+        self.key_listener.start()
+
+    def toggle_mute(self):
+        self.is_muted = not self.is_muted
+        self.mute_btn.config(text="🔊 Unmute Aria" if self.is_muted else "🔇 Mute Aria")
+
+    def stop_tts(self):
+        # In a real implementation with a proper player, we'd kill the process
+        # For now, we'll just skip the next speak call if it's currently running
+        print("Stopping TTS playback...")
+        if os.name == 'nt':
+            os.system("taskkill /IM Microsoft.Photos.exe /F") # Just an example if it opened in a default app
+
+    def on_key_press(self, key):
+        if key == keyboard.Key.esc:
+            self.stop_tts()
+
+    def handle_voice_command(self, text):
+        """Handle transcribed text from voice input."""
+        print(f"Voice Command Received: {text}")
+        # Could send to backend as a special prompt injection
+        try:
+            requests.post(
+                f"{BACKEND_URL}/voice-input",
+                json={"text": text},
+                timeout=5
+            )
+        except Exception:
+            pass
 
     def on_mouse_click(self, x, y, button, pressed):
         """Send every mouse press to backend for confusion tracking."""
@@ -120,15 +175,13 @@ class LegacyBridgeApp:
         self.action_label.config(text=f"Hint: {hint}" if hint else "")
 
         # ── Voice output (skip if same as last) ──────────────────────────
-        if guidance != self.last_spoken:
+        if guidance != self.last_spoken and not self.is_muted:
             self.last_spoken = guidance
-            def speak():
-                try:
-                    engine.say(guidance)
-                    engine.runAndWait()
-                except Exception as e:
-                    print(f"Voice Error: {e}")
-            threading.Thread(target=speak, daemon=True).start()
+            threading.Thread(target=lambda: self.tts.speak(guidance), daemon=True).start()
+
+        # ── Visual Highlights ────────────────────────────────────────────
+        if hint:
+            self.visual_overlay.draw_target(hint)
 
         # ── Urgency-based styling + response time in status ────────────────
         time_label = f" | {response_ms:.0f}ms{'⚡' if cache_hit else ''}" if response_ms else ""
