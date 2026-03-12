@@ -23,3 +23,8 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+
+context.md
+.gemini.md
+GEMINI.md
