@@ -45,8 +45,14 @@ class ConfusionDetector:
         # (guidance_text, timestamp)
         self.guidance_history: deque = deque(maxlen=15)
 
-        # Timestamp of last recorded click
-        self.last_click_time: float = time.time()
+        # (phash, timestamp)
+        self.phash_history: deque = deque(maxlen=15)
+
+        # List of (x, y, timestamp) points received in batches
+        self.movement_history: deque = deque(maxlen=1000)
+
+        # Timestamp of last recorded user interaction (click or move)
+        self.last_interaction_time: float = time.time()
 
         # Running state
         self.is_confused: bool = False
@@ -58,8 +64,23 @@ class ConfusionDetector:
 
     def record_click(self, x: int, y: int):
         """Record a mouse click from the client."""
-        self.click_history.append((x, y, time.time()))
-        self.last_click_time = time.time()
+        now = time.time()
+        self.click_history.append((x, y, now))
+        self.last_interaction_time = now
+
+    def record_movement(self, points: List[Tuple[int, int, float]]):
+        """Record a batch of mouse movement points."""
+        if not points:
+            return
+        now = time.time()
+        for p in points:
+            # points are (x, y, timestamp)
+            self.movement_history.append(p)
+        self.last_interaction_time = max(self.last_interaction_time, points[-1][2])
+
+    def record_phash(self, phash: str):
+        """Record the perceptual hash of the current screen."""
+        self.phash_history.append((phash, time.time()))
 
     def record_response(self, guidance: str, urgency: str):
         """Record a Gemini response for pattern tracking."""
@@ -73,57 +94,78 @@ class ConfusionDetector:
         cutoff = time.time() - (window or TIME_WINDOW)
         return [(x, y, t) for x, y, t in self.click_history if t > cutoff]
 
+    def _recent_movements(self, window: float = None) -> List[Tuple[int, int, float]]:
+        cutoff = time.time() - (window or TIME_WINDOW)
+        return [(x, y, t) for x, y, t in self.movement_history if t > cutoff]
+
     def _recent_urgencies(self) -> List[str]:
         cutoff = time.time() - TIME_WINDOW
         return [u for u, t in self.urgency_history if t > cutoff]
 
-    def _recent_guidances(self) -> List[str]:
+    def _recent_phashes(self) -> List[str]:
         cutoff = time.time() - TIME_WINDOW
-        return [g for g, t in self.guidance_history if t > cutoff]
+        return [p for p, t in self.phash_history if t > cutoff]
 
     # ─── Detection checks ────────────────────────────────────────────────
 
-    def _check_repeated_clicks(self) -> float:
-        """User clicking same spot repeatedly → weight 0.35"""
-        recent = self._recent_clicks()
-        if len(recent) < CONFUSION_THRESHOLD:
-            return 0.0
-
-        last_n = recent[-CONFUSION_THRESHOLD:]
-        cx = sum(c[0] for c in last_n) / len(last_n)
-        cy = sum(c[1] for c in last_n) / len(last_n)
-
-        all_close = all(
-            math.hypot(c[0] - cx, c[1] - cy) <= CLICK_RADIUS
-            for c in last_n
-        )
-        return 0.35 if all_close else 0.0
-
-    def _check_rapid_clicks(self) -> float:
-        """Panic clicking — many fast clicks in a short burst → weight 0.20"""
-        recent = self._recent_clicks(window=RAPID_CLICK_WINDOW)
-        return 0.20 if len(recent) >= RAPID_CLICK_COUNT else 0.0
-
-    def _check_repeated_urgency(self) -> float:
-        """Gemini keeps saying high urgency → weight 0.20"""
+    def _check_vision_urgency(self) -> float:
+        """Gemini flags HIGH urgency → weight 0.40"""
         recent = self._recent_urgencies()
-        if len(recent) < CONFUSION_THRESHOLD:
+        if not recent:
             return 0.0
-        last_n = recent[-CONFUSION_THRESHOLD:]
-        return 0.20 if all(u == "high" for u in last_n) else 0.0
+        # If last N are high, or majority are high
+        last_n = recent[-3:]
+        high_count = sum(1 for u in last_n if u == "high")
+        return (high_count / len(last_n)) * 0.40
 
     def _check_screen_stagnation(self) -> float:
-        """Same guidance repeated (user hasn't progressed) → weight 0.15"""
-        recent = self._recent_guidances()
-        if len(recent) < CONFUSION_THRESHOLD:
+        """Same phash for 3+ cycles → weight 0.25"""
+        recent = self._recent_phashes()
+        if len(recent) < 3:
             return 0.0
-        last_n = recent[-CONFUSION_THRESHOLD:]
-        return 0.15 if len(set(last_n)) == 1 else 0.0
+        last_3 = recent[-3:]
+        # Use a small threshold for phash similarity if needed, but GEMINI.md says "same phash"
+        # We'll use exact match for now as backend already filters near-duplicates
+        if len(set(last_3)) == 1:
+            return 0.25
+        return 0.0
+
+    def _check_mouse_drift(self) -> float:
+        """Erratic cursor movement without clicks → weight 0.20"""
+        recent_moves = self._recent_movements(window=10) # Look at last 10s
+        recent_clicks = self._recent_clicks(window=10)
+
+        if len(recent_moves) < 10 or len(recent_clicks) > 2:
+            return 0.0
+
+        # Calculate distances between consecutive points
+        distances = []
+        for i in range(1, len(recent_moves)):
+            p1 = recent_moves[i-1]
+            p2 = recent_moves[i]
+            d = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+            distances.append(d)
+
+        if not distances:
+            return 0.0
+
+        avg_dist = sum(distances) / len(distances)
+        variance = sum((d - avg_dist) ** 2 for d in distances) / len(distances)
+
+        # If movement is significant but erratic (high variance)
+        if avg_dist > 5 and variance > 50:
+            return 0.20
+        return 0.0
 
     def _check_inactivity(self) -> float:
-        """No clicks for a long time (user might be frozen) → weight 0.10"""
-        elapsed = time.time() - self.last_click_time
-        return 0.10 if elapsed > INACTIVITY_TIMEOUT else 0.0
+        """No interaction (click/move) for 15+ seconds → weight 0.10"""
+        elapsed = time.time() - self.last_interaction_time
+        return 0.10 if elapsed > 15 else 0.0
+
+    def _check_rapid_clicks(self) -> float:
+        """Panic clicking — weight 0.05"""
+        recent = self._recent_clicks(window=RAPID_CLICK_WINDOW)
+        return 0.05 if len(recent) >= RAPID_CLICK_COUNT else 0.0
 
     # ─── Main evaluation ─────────────────────────────────────────────────
 
@@ -133,11 +175,11 @@ class ConfusionDetector:
           is_confused, score, reason, prompt_modifier
         """
         checks = {
-            "repeated_clicks":  self._check_repeated_clicks(),
-            "rapid_clicks":     self._check_rapid_clicks(),
-            "high_urgency":     self._check_repeated_urgency(),
+            "vision_urgency":    self._check_vision_urgency(),
             "screen_stagnation": self._check_screen_stagnation(),
-            "inactivity":       self._check_inactivity(),
+            "mouse_drift":       self._check_mouse_drift(),
+            "inactivity":        self._check_inactivity(),
+            "rapid_clicks":      self._check_rapid_clicks(),
         }
 
         score = min(sum(checks.values()), 1.0)
@@ -177,46 +219,44 @@ class ConfusionDetector:
             "\n⚠️ CONFUSION ALERT — The user appears to be struggling. Adjust your response:"
         ]
 
-        if "repeated_clicks" in reasons:
+        if "vision_urgency" in reasons:
             parts.append(
-                "• They tapped the SAME spot multiple times. They can't find the right button. "
-                "Describe the EXACT visual target using color, shape, and screen position (top/bottom/left/right)."
-            )
-
-        if "rapid_clicks" in reasons:
-            parts.append(
-                "• They are clicking very rapidly — this signals frustration or panic. "
-                "Start your response with something calming like 'It's okay, let's slow down together.'"
-            )
-
-        if "high_urgency" in reasons:
-            parts.append(
-                "• You have flagged high urgency multiple times in a row. "
-                "The user has not recovered. Offer a DIFFERENT, simpler instruction than before."
+                "• You have flagged high urgency multiple times. The user is stuck. "
+                "Offer a DIFFERENT, simpler instruction than before."
             )
 
         if "screen_stagnation" in reasons:
             parts.append(
-                "• The screen hasn't changed — your previous guidance didn't work. "
-                "Try a completely different approach. Describe the physical action step-by-step."
+                "• The screen hasn't changed despite your guidance. "
+                "Try a completely different approach. Describe physical landmarks (color, shape)."
+            )
+
+        if "mouse_drift" in reasons:
+            parts.append(
+                "• The user is moving the mouse erratically but not clicking. They are searching. "
+                "Gently point them to the correct area: 'Look towards the [position] for the [color] [shape].'"
+            )
+
+        if "rapid_clicks" in reasons:
+            parts.append(
+                "• They are clicking very rapidly — this signals frustration. "
+                "Start with something calming: 'It's okay, let's take a breath and try one simple thing.'"
             )
 
         if "inactivity" in reasons:
             parts.append(
-                "• The user has stopped interacting entirely. They may be frozen or confused. "
-                "Gently ask if they need help: 'Are you still there? I'm here whenever you're ready.'"
+                "• The user has stopped interacting. They may be overwhelmed. "
+                "Gently re-engage: 'Are you still there? I'm here to help whenever you're ready.'"
             )
 
-        # Escalation — if confused for many cycles, get even more direct
+        # Escalation
         if self.consecutive_confused_cycles >= 5:
             parts.append(
-                "🚨 EXTENDED CONFUSION: The user has been stuck for over 5 cycles. "
-                "Give the MOST direct, single-action instruction possible. "
-                "Example: 'Put your finger on the big green circle at the very bottom of the screen.'"
+                "🚨 CRITICAL: User stuck for a long time. Suggest a break or offer to call family."
             )
 
         parts.append(
-            "Use an EXTRA warm, grandchild-like tone. Keep guidance under 15 words."
+            "Use an EXTRA warm tone. Keep guidance under 15 words."
         )
 
         return "\n".join(parts)
@@ -237,8 +277,10 @@ class ConfusionDetector:
         self.click_history.clear()
         self.urgency_history.clear()
         self.guidance_history.clear()
+        self.phash_history.clear()
+        self.movement_history.clear()
         self.is_confused = False
         self.confusion_score = 0.0
         self.confusion_reason = "none"
         self.consecutive_confused_cycles = 0
-        self.last_click_time = time.time()
+        self.last_interaction_time = time.time()
