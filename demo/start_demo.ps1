@@ -12,7 +12,7 @@
 
 param(
     [string]$KeyPath = "C:\Users\User\Downloads\key.json",
-    [string]$BackendUrl = "http://localhost:8000"
+    [string]$BackendUrl = "http://127.0.0.1:8000"
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,7 +60,7 @@ $serverPath = Join-Path $rootPath "server"
 Start-Process powershell -ArgumentList @(
     "-NoExit",
     "-Command",
-    "cd '$serverPath'; `$env:GOOGLE_APPLICATION_CREDENTIALS='$KeyPath'; uvicorn app.main:app --reload --port 8000"
+    "cd '$serverPath'; `$env:GOOGLE_APPLICATION_CREDENTIALS='$KeyPath'; uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
 ) -WindowStyle Normal
 
 # ── Step 5: Wait for backend to come online ────────────────────────────────────
