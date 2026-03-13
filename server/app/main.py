@@ -35,6 +35,11 @@ from app.image_utils import process_image_async, is_similar
 from app.ai_optimizer import WarmUpManager, parse_with_retry, sanitize_response, RETRY_PROMPT
 from app.adk_wrapper import LegacyBridgeAgent
 
+# Create model - using flash for low latency
+# Gemini 2.0 Flash supports controlled JSON output
+model = genai.GenerativeModel(
+    'gemini-2.0-flash',
+    generation_config={"response_mime_type": "application/json"}
 # ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +50,12 @@ logger = logging.getLogger("aria.backend")
 # ─── Environment & Vertex AI init ────────────────────────────────────────────
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
+# Response Schema for structured parsing
+class AriaGuidance(BaseModel):
+    guidance: str
+    urgency: str  # "low", "medium", "high"
+    action_hint: Optional[str] = None  # e.g., "tap green circle"
+    confidence: float
 vertexai.init(
     project=os.getenv("GOOGLE_CLOUD_PROJECT", "legacybridge-hackathon"),
     location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-east4")
@@ -75,6 +86,10 @@ PERSONA RULES:
 
 RESPONSE FORMAT (return strict JSON):
 {
+  "guidance": "A single, simple sentence for the user (max 12 words).",
+  "urgency": "low/medium/high (high if they look stuck or clicked wrong many times)",
+  "action_hint": "Brief physical description of the next step (e.g. 'green circle at bottom')",
+  "confidence": 0.0 to 1.0
   "guidance": "Your spoken guidance here. One or two sentences max.",
   "urgency": "LOW | MEDIUM | HIGH",
   "poll_interval_hint": 2,
@@ -199,6 +214,51 @@ async def _call_gemini(image_bytes: bytes, instruction: str) -> str:
 
 @app.get("/")
 async def root():
+    return {"status": "Aria is online"}
+
+@app.post("/process-screen")
+async def process_screen(file: UploadFile = File(...)):
+    """Receives a screenshot and processes it with Gemini Vision for JSON output."""
+    try:
+        # Read and basic processing (ensure it's a valid image)
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents))
+
+        # Prepare content for Gemini
+        prompt_parts = [
+            SYSTEM_PROMPT,
+            "Identify the current screen and tell the user what to do. Provide JSON.",
+            image
+        ]
+
+        # Generate structured response
+        response = model.generate_content(prompt_parts)
+
+        # Parse the JSON response
+        try:
+            data = json.loads(response.text)
+            aria_response = AriaGuidance(**data)
+            print(f"Aria Guidance: {aria_response.guidance} (Confidence: {aria_response.confidence})")
+
+            return {
+                "status": "success",
+                "data": aria_response.dict()
+            }
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"Parsing error: {e} | Raw: {response.text}")
+            return {
+                "status": "error",
+                "message": "Failed to parse Aria's response",
+                "raw": response.text
+            }
+
+    except Exception as e:
+        print(f"Error processing screen: {e}")
+        return {"status": "error", "message": str(e)}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
     return {
         "status": "Aria is online",
         "version": "3.0.0",
