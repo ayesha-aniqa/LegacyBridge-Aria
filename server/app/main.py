@@ -126,6 +126,7 @@ _CACHE_TTL_SECONDS = 8   # Cached response expires after 8s even if hash matches
 # Track last screen hash for skip-logic
 _last_phash: str = ""
 _last_urgency: str = "low"
+_last_image_bytes: Optional[bytes] = None  # Store last screen for voice context
 
 # Guidance anti-repetition cache
 _recent_guidances: List[str] = []
@@ -243,11 +244,53 @@ async def reset_confusion():
 
 @app.post("/voice-input")
 async def voice_input(input_data: VoiceInput):
-    """Handle voice commands from the user."""
+    """
+    Handle voice commands/questions from the user with visual context.
+    Uses the last seen screen to answer questions like "What is this?".
+    """
     logger.info("🎤 Voice input: %s", input_data.text)
-    # In a full implementation, this would trigger an immediate Gemini call 
-    # with the voice command as a high-priority instruction.
-    return {"status": "received", "command": input_data.text}
+    
+    # Check if we have visual context
+    if _last_image_bytes is None:
+         return {
+             "status": "success", 
+             "data": {
+                 "guidance": "I'm listening, but I can't see your screen yet. Please wait a moment.",
+                 "urgency": "LOW",
+                 "poll_interval_hint": 2,
+                 "confusion_assessment": "Waiting for screen"
+             }
+         }
+
+    # Build prompt with user's voice command
+    instruction = (
+        f"USER VOICE COMMAND: \"{input_data.text}\"\n\n"
+        "TASK: The user is speaking to you directly. "
+        "Answer their question or follow their command based on the screen you see. "
+        "If they are asking for help, guide them clearly. "
+        "Keep your response warm and conversational but concise."
+    )
+
+    # Helper for retry
+    async def _retry_call():
+         return await _call_gemini(_last_image_bytes, RETRY_PROMPT)
+
+    try:
+        # Call Gemini with the voice instruction + last image
+        response_text = await _call_gemini(_last_image_bytes, instruction)
+        aria_dict = await parse_with_retry(response_text, _retry_call)
+        
+        if aria_dict is None:
+            return {"status": "error", "message": "Failed to generate voice response"}
+
+        return {
+            "status": "success",
+            "data": aria_dict,
+            "source": "voice_command"
+        }
+    except Exception as e:
+        logger.error("Voice processing error: %s", e, exc_info=True)
+        return {"status": "error", "message": str(e)}
 
 @app.post("/process-screen")
 async def process_screen(
@@ -263,7 +306,7 @@ async def process_screen(
       5. Response caching + anti-repetition
       6. Adaptive poll interval in response
     """
-    global _last_phash, _last_urgency, _recent_guidances, _recent_descriptions
+    global _last_phash, _last_urgency, _recent_guidances, _recent_descriptions, _last_image_bytes
     t_start = time.perf_counter()
     _stats["total_requests"] += 1
 
@@ -271,6 +314,10 @@ async def process_screen(
         # ── 1. Async image processing ─────────────────────────────────────
         raw_bytes = await file.read()
         _, image_bytes, phash = await process_image_async(raw_bytes)
+        
+        # Update global image context for voice
+        _last_image_bytes = image_bytes
+        
         t_image = time.perf_counter()
 
         # ── 2. Confusion state & Cache lookup ─────────────────────────────
