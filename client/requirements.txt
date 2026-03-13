@@ -4,3 +4,7 @@ requests
 python-dotenv
 tk
 pyttsx3
+pynput
+google-cloud-texttospeech
+google-cloud-speech
+PyAudio
