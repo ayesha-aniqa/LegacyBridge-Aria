@@ -58,7 +58,7 @@ class AriaGuidance(BaseModel):
     confidence: float
 vertexai.init(
     project=os.getenv("GOOGLE_CLOUD_PROJECT", "legacybridge-hackathon"),
-    location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-east4")
+    location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 )
 
 # Gemini 2.0 Flash — tuned for latency and consistency
