@@ -183,8 +183,8 @@ python tests/test_ai_quality.py
 | Member | Role |
 |---|---|
 | **Hammad** | Backend / AI — Gemini integration, confusion detection, optimization |
-| **Dev 2** | Frontend / UX — Tkinter overlay, TTS, elderly UX design |
-| **Dev 3** | Cloud / Demo — Docker, Cloud Run, architecture, demo video |
+| **Rameesha** | Frontend / UX — Tkinter overlay, TTS, elderly UX design |
+| **Ayesha** | Cloud / Demo — Docker, Cloud Run, architecture, demo video |
 
 ---
 
