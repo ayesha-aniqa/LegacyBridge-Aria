@@ -82,7 +82,7 @@ Edit `.env`:
 ```env
 GOOGLE_APPLICATION_CREDENTIALS=C:\Users\User\Downloads\key.json
 GOOGLE_CLOUD_PROJECT=your-project-id
-GOOGLE_CLOUD_LOCATION=us-ecentral1
+GOOGLE_CLOUD_LOCATION=us-central1
 ```
 
 ### 3. Start the Backend
