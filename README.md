@@ -1,4 +1,6 @@
-# LegacyBridge 👵🤝🤖
+# LegacyBridge 🤖
+
+**1 billion+ elderly people** worldwide struggle with smartphones and computers. They get confused, click the wrong things, and have no one to help in real time.
 
 **LegacyBridge** is an always-on AI screen-watching agent that helps elderly non-tech users navigate their devices using only natural voice guidance — no DOM access, no app APIs, purely vision-based.
 
@@ -6,12 +8,33 @@
 
 ---
 
-## 🚀 The Problem & Solution
-
-**1 billion+ elderly people** worldwide struggle with smartphones and computers. They get confused, click the wrong things, and have no one to help in real time.
 
 **Aria** watches their screen every few seconds using **Gemini 2.0 Flash Vision**, understands what is happening, detects confusion, and speaks calm guidance like:
 > *"I see your daughter Sara is calling. Touch the big green circle on the right."*
+
+---
+
+## 🌟 Key Features
+
+### 1. The Confusion Brain
+LegacyBridge monitors behavioral signals to detect frustration before the user gives up:
+*   **Stagnation Check:** Detects when the user is stuck on the same screen for >15s.
+*   **Drift Analysis:** Identifies erratic mouse movement indicative of searching/lost intent.
+*   **Vision Urgency:** Gemini proactively flags high-stress layouts (e.g., error popups).
+
+### 2. Multi-Channel Guidance
+*   **Voice (Aria):** Natural, slow-paced speech that explains *where* to look.
+*   **Vision (The Pulse):** A pulsing red highlight that appears directly over the button Aria is describing.
+*   **Listening:** Users can speak back ("Aria, I'm lost") using integrated STT wake-word detection.
+
+### 3. High-Performance Orchestration
+*   **Perceptual Hashing (pHash):** Skips redundant AI calls if the screen hasn't changed.
+*   **ADK Integration:** Uses Google's Agent Development Kit to manage complex multi-step reasoning.
+
+---
+## Architecture Diagram
+
+![System Architecture](./docs/architecture.svg)
 
 ---
 
@@ -178,20 +201,20 @@ python tests/test_ai_quality.py
 
 ---
 
-## 👥 Team & Roles
+## 👥 Team & Contributions
 
-| Member | Role |
-|---|---|
-| **Hammad** | Backend / AI — Gemini integration, confusion detection, optimization |
-| **Rameesha** | Frontend / UX — Tkinter overlay, TTS, elderly UX design |
-| **Ayesha** | Cloud / Demo — Docker, Cloud Run, architecture, demo video |
+| Member | Role | Primary Contributions |
+| :--- | :--- | :--- |
+| **[Hammad](https://www.linkedin.com/in/hammad-ali-9848792b4/)** | **Backend & AI Lead** | Gemini 2.0 integration, Confusion Detection Engine, ADK implementation, and API optimization. |
+| **[Rameesha](https://www.linkedin.com/in/rameesha-siddique-5aa324343/)** | **Frontend & UX Lead** | Modular client architecture, Google Cloud TTS/STT integration, Aria persona design, and elderly UX research. |
+| **[Ayesha](https://www.linkedin.com/in/ayesha-aniqa-342220282/)** | **Cloud & DevOps && Team Lead** | Google Cloud Run deployment, Dockerization, Terraform IaC scripts, and Demo orchestration. |
 
 ---
 
-## 🏆 Hackathon Submission
+## 🎬 Live Demo & Submission
 
+- **Demo Video:** [Watch on YouTube](https://youtube.com/link-to-video)
+- **Blog Post:** [Read on Dev.to](https://dev.to/link-to-post)
 - **Contest:** Gemini Live Agent Challenge (Google × Devpost)
-- **Deadline:** March 16, 2026
-- **Category:** UI Navigator
-- **Demo Video:** *(YouTube link here)*
-- **Blog Post:** *(Medium/dev.to link here)*
+
+---
