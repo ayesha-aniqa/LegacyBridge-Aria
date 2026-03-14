@@ -13,8 +13,6 @@ from tts_helper import AriaTTS
 from visual_overlay import VisualOverlay
 from voice_input import AriaVoiceInput
 
-
-
 # Load environment variables
 load_dotenv()
 
@@ -50,13 +48,14 @@ class LegacyBridgeApp:
         self.status_label.pack()
 
         self.confusion_label = tk.Label(root, text="🟢 User seems comfortable",
-                                        font=("Arial", 9), fg="#27ae60")
+                                        font=("Arial", 11), fg="#27ae60")  # slightly larger default
         self.confusion_label.pack(pady=(2, 0))
 
         self.guidance_box = tk.Text(root, height=5, width=40, font=("Arial", 16, "bold"),
                                     wrap=tk.WORD, bg="#f9f9f9", padx=10, pady=10)
         self.guidance_box.pack(pady=10)
         self.guidance_box.insert(tk.END, "Hello! I'm Aria 😊\nI'll guide you if you need help.")
+        self.guidance_box.config(state=tk.DISABLED)
 
         self.scrollbar = tk.Scrollbar(root)
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -71,13 +70,20 @@ class LegacyBridgeApp:
         self.mute_btn = tk.Button(self.controls_frame, text="🔇 Mute Aria",
                                   command=self.toggle_mute, bg="#ecf0f1", font=("Arial", 10))
         self.mute_btn.pack(side=tk.LEFT, padx=5)
+        self.mute_btn.config(width=15, height=2)
 
         self.stop_btn = tk.Button(self.controls_frame, text="🛑 Stop Speaking (ESC)",
                                   command=self.stop_tts, bg="#fadbd8", font=("Arial", 10))
         self.stop_btn.pack(side=tk.LEFT, padx=5)
+        self.stop_btn.config(width=15, height=2)
 
         self.action_label = tk.Label(root, text="", font=("Arial", 12, "italic"), fg="#e67e22")
         self.action_label.pack()
+
+        # ── Optional Debug Panel for Day 8 Usability
+        self.debug_box = tk.Text(root, height=5, width=40, font=("Arial", 10), bg="#eee")
+        self.debug_box.pack(pady=5)
+        self.debug_box.config(state=tk.DISABLED)
 
         # ── State Variables
         self.last_spoken = ""
@@ -100,32 +106,55 @@ class LegacyBridgeApp:
 
     # ── Close
     def on_close(self):
+        if not self.running:
+            return  # prevent multiple calls
         self.running = False
+
         # Stop listeners safely
         try:
             if hasattr(self, "mouse_listener") and self.mouse_listener.running:
                 self.mouse_listener.stop()
             if hasattr(self, "key_listener") and self.key_listener.running:
                 self.key_listener.stop()
-        except:
-            pass
+        except Exception as e:
+            print(f"Listener stop error: {e}")
+
         # Stop TTS
         try:
             self.tts.stop()
+        except Exception as e:
+            print(f"TTS stop error: {e}")
+
+        # Destroy overlay window if exists
+        try:
+            if hasattr(self.visual_overlay, "destroy"):
+                self.visual_overlay.destroy()
         except:
             pass
-        self.root.destroy()
+
+        # Destroy main window
+        try:
+            self.root.destroy()
+        except Exception as e:
+            print(f"Tkinter destroy error: {e}")
 
     # ── Controls
     def toggle_mute(self):
         self.is_muted = not self.is_muted
         if self.is_muted:
             self.tts.stop()
+            self.log_debug("Aria muted")
+            self.status_label.config(text="Status: Muted", fg="gray")
+        else:
+            self.log_debug("Aria unmuted")
+            self.status_label.config(text="Status: Monitoring", fg="green")
         self.mute_btn.config(text="🔊 Unmute Aria" if self.is_muted else "🔇 Mute Aria")
 
     def stop_tts(self):
         print("Stopping TTS playback...")
         self.tts.stop()
+        self.log_debug("TTS stopped")
+        self.status_label.config(text="Status: TTS Stopped", fg="orange")
 
     def on_key_press(self, key):
         if key == keyboard.Key.esc:
@@ -134,6 +163,7 @@ class LegacyBridgeApp:
     # ── Voice Input
     def handle_voice_command(self, text):
         print(f"Voice Command Received: {text}")
+        self.log_debug(f"Voice Command: {text}")
         try:
             requests.post(f"{BACKEND_URL}/voice-input", json={"text": text}, timeout=5)
         except:
@@ -142,6 +172,7 @@ class LegacyBridgeApp:
     # ── Mouse Tracking
     def on_mouse_click(self, x, y, button, pressed):
         if pressed:
+            self.log_debug(f"Mouse Click at ({x},{y})")
             try:
                 requests.post(f"{BACKEND_URL}/report-click", json={"x": int(x), "y": int(y)}, timeout=2)
             except:
@@ -155,33 +186,45 @@ class LegacyBridgeApp:
             if len(self.movement_buffer) > 500:
                 self.movement_buffer.pop(0)
 
+    # ── Debug Logging
+    def log_debug(self, msg):
+        self.debug_box.config(state=tk.NORMAL)
+        self.debug_box.insert(tk.END, f"[DEBUG] {msg}\n")
+        self.debug_box.see(tk.END)
+        self.debug_box.config(state=tk.DISABLED)
+
     # ── UI Update
     def update_ui(self, guidance, urgency, hint, confusion=None, response_ms=None, cache_hit=False):
+        # Guidance box update
+        self.guidance_box.config(state=tk.NORMAL)
         self.guidance_box.delete(1.0, tk.END)
         self.guidance_box.insert(tk.END, guidance)
         self.guidance_box.see(tk.END)
+        self.guidance_box.config(state=tk.DISABLED)
+
         self.action_label.config(text=f"👉 Try this: {hint}" if hint else "")
 
         if guidance != self.last_spoken and not self.is_muted:
             self.last_spoken = guidance
             self.tts.speak(guidance)
 
+        # Overlay visual target with larger size for elderly
         if hint:
             try:
-                self.visual_overlay.draw_target(hint)
+                self.visual_overlay.draw_target(hint, size=35)  # increased size
             except:
-                pass
+                self.log_debug(f"Overlay draw error for hint: {hint}")
 
-        # Status styling
+        # Status styling with improved contrast
         time_label = f" | {response_ms:.0f}ms{'⚡' if cache_hit else ''}" if response_ms else ""
         if urgency == "high":
-            self.guidance_box.config(bg="#ffe5e5")
+            self.guidance_box.config(bg="#ffcccc")
             self.status_label.config(text=f"Status: Active Help{time_label}", fg="red")
         elif urgency == "medium":
-            self.guidance_box.config(bg="#fff4cc")
+            self.guidance_box.config(bg="#fff0b3")
             self.status_label.config(text=f"Status: Suggesting{time_label}", fg="orange")
         else:
-            self.guidance_box.config(bg="#e8f8f5")
+            self.guidance_box.config(bg="#e0f7f4")
             self.status_label.config(text=f"Status: Monitoring{time_label}", fg="green")
 
         # Confusion UI
@@ -189,12 +232,19 @@ class LegacyBridgeApp:
             score_pct = int(confusion["score"] * 100)
             streak = confusion.get("streak", 0)
             reason = confusion.get("reason", "")
-            self.confusion_label.config(text=f"🔴 Confused ({score_pct}%) — streak {streak} — {reason}",
-                                        fg="#e74c3c", font=("Arial", 10, "bold"))
+            self.confusion_label.config(
+                text=f"🔴 Confused ({score_pct}%) — streak {streak} — {reason}",
+                fg="#e74c3c",
+                font=("Arial", 12, "bold")
+            )
             if not self.is_muted:
                 self.tts.speak(f"User confusion detected: {score_pct} percent")
         else:
-            self.confusion_label.config(text="🟢 User seems comfortable", fg="#27ae60", font=("Arial", 9))
+            self.confusion_label.config(
+                text="🟢 User seems comfortable", 
+                fg="#27ae60", 
+                font=("Arial", 11)
+            )
 
     # ── Screenshot Loop
     def capture_and_process(self):
