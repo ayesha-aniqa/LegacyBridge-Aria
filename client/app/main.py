@@ -67,20 +67,20 @@ class LegacyBridgeApp:
         self.confusion_label.pack(pady=(2, 0))
 
         self.guidance_box = tk.Text(
-            root,
-            height=5,
-            width=40,
-            font=("Arial", 14),
-            wrap=tk.WORD,
-            bg="#f9f9f9",
-            padx=10,
-            pady=10
-        )
+           root,
+           height=5,
+           width=40,
+           font=("Arial", 18, "bold"),  # ✅ Comma added
+           wrap=tk.WORD,
+           bg="#f9f9f9",
+           padx=10,
+           pady=10
+           )
         self.guidance_box.pack(pady=10)
         self.guidance_box.insert(
             tk.END,
-            "I'm here to help. Just use your computer normally."
-        )
+            "Hello! I'm Aria 😊\nI'll guide you if you need help."
+            )
 
         # ── Controls ─────────────────────────────────────────────────────
         self.controls_frame = tk.Frame(root)
@@ -223,16 +223,21 @@ class LegacyBridgeApp:
         self.guidance_box.delete(1.0, tk.END)
         self.guidance_box.insert(tk.END, guidance)
 
-        self.action_label.config(text=f"Hint: {hint}" if hint else "")
+        self.action_label.config(
+            text=f"👉 Try this: {hint}" if hint else ""
+            )
 
         # Voice output
         if guidance != self.last_spoken and not self.is_muted:
             self.last_spoken = guidance
 
             threading.Thread(
-                target=lambda: self.tts.speak(guidance),
-                daemon=True
-            ).start()
+                target=lambda: (
+                    time.sleep(0.8),
+                    self.tts.speak(guidance)
+                    ),
+                    daemon=True
+                    ).start()
 
         # Visual overlay
         if hint:
@@ -245,21 +250,21 @@ class LegacyBridgeApp:
         )
 
         if urgency == "high":
-            self.guidance_box.config(bg="#fff2f2")
+            self.guidance_box.config(bg="#ffe5e5")
             self.status_label.config(
                 text=f"Status: Active Help{time_label}",
                 fg="red"
             )
 
         elif urgency == "medium":
-            self.guidance_box.config(bg="#fffdf2")
+            self.guidance_box.config(bg="#fff4cc")
             self.status_label.config(
                 text=f"Status: Suggesting{time_label}",
                 fg="orange"
             )
 
         else:
-            self.guidance_box.config(bg="#f2fff2")
+            self.guidance_box.config(bg="#e8f8f5")
             self.status_label.config(
                 text=f"Status: Monitoring{time_label}",
                 fg="green"
