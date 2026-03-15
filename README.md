@@ -103,13 +103,22 @@ cp .env.example .env
 
 Edit `.env`:
 ```env
+# Google Cloud
 GOOGLE_APPLICATION_CREDENTIALS=C:\Users\User\Downloads\key.json
 GOOGLE_CLOUD_PROJECT=your-project-id
 GOOGLE_CLOUD_LOCATION=us-central1
+
+# API Settings (Backend is hosted on Google Cloud)
+BACKEND_URL=https://legacybridge-backend-1075317287058.us-central1.run.app
 ```
 
-### 3. Start the Backend
+### 3. Start the Backend (Optional)
 
+The backend is currently hosted on Google Cloud Run. Add this to your `.env` file and client will automatically connect to it. 
+`BACKEND_URL='https://legacybridge-backend-1075317287058.us-central1.run.app'`. 
+You **do not** need to run it locally.
+
+If you wish to run the backend locally for development:
 ```bash
 cd server
 uvicorn app.main:app --reload --port 8000
@@ -141,8 +150,8 @@ python app/main.py
 # Step 1 — Generate mock screens (one time)
 python demo/mock_screen_generator.py
 
-# Step 2 — Start backend (separate terminal)
-cd server && uvicorn app.main:app --reload
+# Step 2 — (Optional) Start local backend if not using Cloud Run
+# cd server && uvicorn app.main:app --reload
 
 # Step 3 — Run the full demo sequence
 python demo/demo_runner.py
