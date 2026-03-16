@@ -1,15 +1,15 @@
-# LegacyBridge 🤖
+# LegacyBridge-Aria 🤖
 
 **1 billion+ elderly people** worldwide struggle with smartphones and computers. They get confused, click the wrong things, and have no one to help in real time.
 
-**LegacyBridge** is an always-on AI screen-watching agent that helps elderly non-tech users navigate their devices using only natural voice guidance — no DOM access, no app APIs, purely vision-based.
+**LegacyBridge-Aria** is an always-on AI screen-watching agent that helps elderly non-tech users navigate their devices using only natural voice guidance — no DOM access, no app APIs, purely vision-based.
 
 > *Gemini Live Agent Challenge 2026 — UI Navigator Category*
 
 ---
 
 
-**Aria** watches their screen every few seconds using **Gemini 2.0 Flash Vision**, understands what is happening, detects confusion, and speaks calm guidance like:
+**LegacyBridge-Aria** watches their screen every few seconds using **Gemini 2.0 Flash Vision**, understands what is happening, detects confusion, and speaks calm guidance like:
 > *"I see your daughter Sara is calling. Touch the big green circle on the right."*
 
 ---
@@ -214,9 +214,9 @@ python tests/test_ai_quality.py
 
 | Member | Role | Primary Contributions |
 | :--- | :--- | :--- |
+| **[Ayesha](https://www.linkedin.com/in/ayesha-aniqa-342220282/)** | **Cloud & DevOps && Team Lead** | Google Cloud Run deployment, Dockerization, Terraform IaC scripts, and Demo orchestration. |
 | **[Hammad](https://www.linkedin.com/in/hammad-ali-9848792b4/)** | **Backend & AI Lead** | Gemini 2.0 integration, Confusion Detection Engine, ADK implementation, and API optimization. |
 | **[Rameesha](https://www.linkedin.com/in/rameesha-siddique-5aa324343/)** | **Frontend & UX Lead** | Modular client architecture, Google Cloud TTS/STT integration, Aria persona design, and elderly UX research. |
-| **[Ayesha](https://www.linkedin.com/in/ayesha-aniqa-342220282/)** | **Cloud & DevOps && Team Lead** | Google Cloud Run deployment, Dockerization, Terraform IaC scripts, and Demo orchestration. |
 
 ---
 
